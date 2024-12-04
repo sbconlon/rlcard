@@ -3,12 +3,16 @@
 from rlcard.agents import RandomAgent
 
 import rlcard
+from rlcard.games.base import Card
 from rlcard import models
 from rlcard.agents import NolimitholdemHumanAgent as HumanAgent
 from rlcard.utils import print_card
 
 # Make environment
-env = rlcard.make('no-limit-holdem')
+config = {'fixed_public_cards': [Card('H', 'T'), Card('S', '8'), Card('S', '7'), Card('H', 'J'), Card('H', '8')],
+          'fixed_player_cards': {0: [Card('S', 'Q'), Card('S', '9')]},
+          'starting_stage': 'river'}
+env = rlcard.make('no-limit-holdem', config=config)
 
 human_agent = HumanAgent(env.num_actions)
 human_agent2 = HumanAgent(env.num_actions)

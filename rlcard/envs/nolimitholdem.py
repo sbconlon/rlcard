@@ -23,14 +23,17 @@ class NolimitholdemEnv(Env):
         '''
         self.name = 'no-limit-holdem'
         self.default_game_config = DEFAULT_GAME_CONFIG
-        self.game = Game()
+        print(config.get('fixed_pubic_cards', []))
+        self.game = Game(fixed_public_cards=config.get('fixed_public_cards', []),
+                         fixed_player_cards=config.get('fixed_player_cards', []),
+                         starting_stage=config.get('starting_stage', None))
         super().__init__(config)
         self.actions = Action
         self.state_shape = [[54] for _ in range(self.num_players)]
         self.action_shape = [None for _ in range(self.num_players)]
         # for raise_amount in range(1, self.game.init_chips+1):
         #     self.actions.append(raise_amount)
-
+        
         with open(os.path.join(rlcard.__path__[0], 'games/limitholdem/card2index.json'), 'r') as file:
             self.card2index = json.load(file)
 

@@ -2,6 +2,9 @@ from enum import Enum
 
 import numpy as np
 from copy import deepcopy
+from collections.abc import Iterable
+
+from rlcard.games.base import Card
 from rlcard.games.limitholdem import Game
 from rlcard.games.limitholdem import PlayerStatus
 
@@ -21,10 +24,9 @@ class Stage(Enum):
 
 
 class NolimitholdemGame(Game):
-    def __init__(self, allow_step_back=False, num_players=2):
+    def __init__(self, allow_step_back=False, num_players=2, fixed_public_cards=[], fixed_player_cards={}, starting_stage=Stage.PREFLOP):
         """Initialize the class no limit holdem Game"""
         super().__init__(allow_step_back, num_players)
-
         self.np_random = np.random.RandomState()
 
         # small blind and big blind
@@ -37,6 +39,44 @@ class NolimitholdemGame(Game):
         # If None, the dealer will be randomly chosen
         self.dealer_id = None
 
+        #
+        # Modifications to restrict the game size
+        #
+        observed_cards = set()
+        # Fix the cards that will be dealt on the flop, turn, and river
+        # Cards are dealt in order (first 3 cards on the flop, etc.)
+        assert(isinstance(fixed_public_cards, Iterable))
+        assert(len(fixed_public_cards) <= 5)
+        for elem in fixed_public_cards:
+            assert(isinstance(elem, Card))
+            assert(not elem in observed_cards)
+            observed_cards.add(elem)
+        self.fixed_public_cards = fixed_public_cards
+        #
+        # Fix the cards that will be dealt to each player
+        # fixed_player_cards: player_num -> [Card1, Card2]
+        assert(isinstance(fixed_player_cards, dict))
+        assert(len(fixed_player_cards) < num_players)
+        for key, value in fixed_player_cards.items():
+            assert(isinstance(key, int))
+            assert(isinstance(value, list))
+            assert(key in range(num_players))
+            assert(isinstance(value, Iterable))
+            assert(len(value) == 2)
+            assert(isinstance(value[0], Card) and isinstance(value[1], Card))
+            assert(not (value[0] in observed_cards or value[1] in observed_cards))
+            observed_cards.add(value[0])
+            observed_cards.add(value[1])
+        self.fixed_player_cards = fixed_player_cards
+        #
+        # Fix the stage that the starting stage of the game
+        # All other actions in the stages prior to this stage are assumed to be checks
+        if starting_stage is None:
+            starting_stage = 'preflop'
+        assert(starting_stage in ('preflop', 'flop', 'turn', 'river'))
+        str_to_stage = {'preflop': Stage.PREFLOP, 'flop': Stage.FLOP, 'turn': Stage.TURN, 'river': Stage.RIVER}
+        self.starting_stage = str_to_stage[starting_stage]
+
     def configure(self, game_config):
         """
         Specify some game specific parameters, such as number of players, initial chips, and dealer id.
@@ -46,6 +86,39 @@ class NolimitholdemGame(Game):
         # must have num_players length
         self.init_chips = [game_config['chips_for_each']] * game_config["game_num_players"]
         self.dealer_id = game_config['dealer_id']
+    
+    def deal_public_cards(self):
+        if not self.dealer:
+            raise ValueError("Dealer must be set before dealing public cards.")
+        if not isinstance(self.public_cards, Iterable):
+            print(f'Public cards: {self.public_cards}')
+            raise TypeError("public_cards must be an iterable.")
+        
+        num_public_cards = {
+            Stage.PREFLOP: 0,
+            Stage.FLOP: 3,
+            Stage.TURN: 4,
+            Stage.RIVER: 5
+        }
+        
+        if self.stage not in num_public_cards:
+            raise ValueError(f"Invalid stage: {self.stage}")
+        
+        # Total cards needed for the current stage
+        total = num_public_cards[self.stage]
+        current_count = len(self.public_cards)
+        num_cards_needed = total - current_count
+        
+        if num_cards_needed < 0:
+            raise ValueError("public_cards already contains more cards than required for this stage.")
+        
+        # Add cards from fixed_public_cards if available
+        cards_from_fixed = self.fixed_public_cards[current_count:(current_count + num_cards_needed)]
+        self.public_cards += cards_from_fixed
+        
+        # Draw additional cards from the dealer if needed
+        remaining_needed = total - len(self.public_cards)
+        self.public_cards += [self.dealer.deal_card() for _ in range(remaining_needed)]
 
     def init_game(self):
         """
@@ -64,6 +137,16 @@ class NolimitholdemGame(Game):
 
         # Initialize a dealer that can deal cards
         self.dealer = Dealer(self.np_random)
+        
+        # Remove fixed cards from the deck
+        for card in self.fixed_public_cards:
+            print(f'Removing {card}')
+            self.dealer.remove_card(card)
+        for hand in self.fixed_player_cards.values():
+            print(f'Removing {hand[0]}')
+            print(f'Removing {hand[1]}')
+            self.dealer.remove_card(hand[0])
+            self.dealer.remove_card(hand[1])
 
         # Initialize players to play the game
         self.players = [Player(i, self.init_chips[i], self.np_random) for i in range(self.num_players)]
@@ -72,21 +155,33 @@ class NolimitholdemGame(Game):
         self.judger = Judger(self.np_random)
 
         # Deal cards to each  player to prepare for the first round
-        for i in range(2 * self.num_players):
-            self.players[i % self.num_players].hand.append(self.dealer.deal_card())
+        for pid in range(self.num_players):
+            if pid in self.fixed_player_cards:
+                self.players[pid].hand = self.fixed_player_cards[pid]
+            else:
+                self.players[pid].hand.append(self.dealer.deal_card())
+                self.players[pid].hand.append(self.dealer.deal_card())
+
+        # Initialize the starting stage of the game
+        self.stage = self.starting_stage
 
         # Initialize public cards
         self.public_cards = []
-        self.stage = Stage.PREFLOP
-
+        self.deal_public_cards()
+        
         # Big blind and small blind
         s = (self.dealer_id + 1) % self.num_players
         b = (self.dealer_id + 2) % self.num_players
         self.players[b].bet(chips=self.big_blind)
         self.players[s].bet(chips=self.small_blind)
 
-        # The player next to the big blind plays the first
-        self.game_pointer = (b + 1) % self.num_players
+        # If the stage is PREFLOP, then
+        # the player next to the big blind plays the first
+        if self.stage == Stage.PREFLOP:
+            self.game_pointer = (b + 1) % self.num_players
+        # Otherwise, the small blind starts
+        else:
+            self.game_pointer = s
 
         # Initialize a bidding round, in the first round, the big blind and the small blind needs to
         # be passed to the round for processing.
@@ -95,7 +190,7 @@ class NolimitholdemGame(Game):
         self.round.start_new_round(game_pointer=self.game_pointer, raised=[p.in_chips for p in self.players])
 
         # Count the round. There are 4 rounds in each game.
-        self.round_counter = 0
+        self.round_counter = int(self.stage.value)
 
         # Save the history for stepping back to the last state.
         self.history = []
@@ -127,13 +222,14 @@ class NolimitholdemGame(Game):
                 (int): next player id
         """
 
+        # Verify the given action is legal
         if action not in self.get_legal_actions():
             print(action, self.get_legal_actions())
             print(self.get_state(self.game_pointer))
             raise Exception('Action not allowed')
 
         if self.allow_step_back:
-            # First snapshot the current state
+            # First take a snapshot of the current state
             r = deepcopy(self.round)
             b = self.game_pointer
             r_c = self.round_counter
@@ -163,20 +259,18 @@ class NolimitholdemGame(Game):
             # For the first round, we deal 3 cards
             if self.round_counter == 0:
                 self.stage = Stage.FLOP
-                self.public_cards.append(self.dealer.deal_card())
-                self.public_cards.append(self.dealer.deal_card())
-                self.public_cards.append(self.dealer.deal_card())
+                self.deal_public_cards()
                 if len(self.players) == np.sum(players_in_bypass):
                     self.round_counter += 1
             # For the following rounds, we deal only 1 card
             if self.round_counter == 1:
                 self.stage = Stage.TURN
-                self.public_cards.append(self.dealer.deal_card())
+                self.deal_public_cards()
                 if len(self.players) == np.sum(players_in_bypass):
                     self.round_counter += 1
             if self.round_counter == 2:
                 self.stage = Stage.RIVER
-                self.public_cards.append(self.dealer.deal_card())
+                self.deal_public_cards()
                 if len(self.players) == np.sum(players_in_bypass):
                     self.round_counter += 1
 
