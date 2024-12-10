@@ -50,3 +50,15 @@ class Card:
             string: the combination of suit and rank of a card. Eg: 1S, 2H, AD, BJ, RJ...
         '''
         return self.suit+self.rank
+    
+    def to_int(self):
+        ''' Maps a given card to a integer [0-53]
+
+        Returns:
+            int: unique integer identifier for the card
+        '''
+        if self.suit == 'BJ':
+            return 52
+        if self.suit == 'RJ':
+            return 53
+        return 13*Card.valid_suit.index(self.suit) + Card.valid_rank.index(self.rank)

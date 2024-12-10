@@ -40,11 +40,16 @@ class NolimitholdemGame(Game):
         self.dealer_id = None
 
         #
-        # Modifications to restrict the game size
+        # Rig dealt cards
         #
+
+        # Set to insure the same card isn't dealt twice
         observed_cards = set()
+        
+        #
         # Fix the cards that will be dealt on the flop, turn, and river
         # Cards are dealt in order (first 3 cards on the flop, etc.)
+        #
         assert(isinstance(fixed_public_cards, Iterable))
         assert(len(fixed_public_cards) <= 5)
         for elem in fixed_public_cards:
@@ -52,9 +57,11 @@ class NolimitholdemGame(Game):
             assert(not elem in observed_cards)
             observed_cards.add(elem)
         self.fixed_public_cards = fixed_public_cards
+
         #
         # Fix the cards that will be dealt to each player
         # fixed_player_cards: player_num -> [Card1, Card2]
+        #
         assert(isinstance(fixed_player_cards, dict))
         assert(len(fixed_player_cards) < num_players)
         for key, value in fixed_player_cards.items():
@@ -68,9 +75,10 @@ class NolimitholdemGame(Game):
             observed_cards.add(value[0])
             observed_cards.add(value[1])
         self.fixed_player_cards = fixed_player_cards
+
         #
-        # Fix the stage that the starting stage of the game
-        # All other actions in the stages prior to this stage are assumed to be checks
+        # Fix the starting stage of the game
+        #
         if starting_stage is None:
             starting_stage = 'preflop'
         assert(starting_stage in ('preflop', 'flop', 'turn', 'river'))
