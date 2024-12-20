@@ -1,97 +1,9 @@
 import math
 import numpy as np
-from ordered_set import OrderedSet
 import random
 
 from rlcard.envs.nolimitholdem import NolimitholdemEnv
-
-#
-# State node in the public tree
-#   - regret values and the policy are computed using cfr
-#   - children are added according to growing-tree cfr
-#
-class StateNode:
-
-    # NOTE - how much of this information should be stored here versus kept in env?
-
-    def __init__(self, public_state, pid, nplayers, player_range : np.array, opponent_values : dict):
-        # Public state for this node
-        self.public_state = public_state
-
-        # Number of players
-        self.nplayers = nplayers
-        
-        # Player id for the player making the decision
-        self.pid = pid
-
-        # List of legal actions
-        self.actions = self.public_state['raw_obs']['legal_actions']
-        
-        # Child states that result from taking action in this state
-        self.children = {a: None for a in self.actions}
-        
-        # Player's probability distribution over actions in this state
-        # initalized to a random strategy.
-        random_strategy = np.random.rand(len(self.actions))
-        random_strategy /= random_strategy.sum()
-        self.strategy = dict(zip(self.actions, random_strategy))
-        
-        # Regret values over possible player actions
-        self.regrets  = {a: 0. for a in self.actions}
-
-        # Regret values for the range gadget
-        self.gadget_regrets = {a: 0. for a in self.actions}
-        
-        #
-        # CFR value of holding each possible hand according to the current strategy profile
-        #
-        # This is represented as a 52x52 upper triangular matrix with the diagonal entries
-        # set to zero
-        #
-        # The input opponent values are taken as gadget values, this is to account
-        # for the fact that the opponent can steer the game away from this public state
-        # if she chooses to.
-        #
-        # The values computed by cfr for both players are initialized to zero.
-        #
-        # Note: the goal of CFR is to compute the active player's values.
-        #
-        self.gadget_values = opponent_values
-        self.cfr_values = {a: np.zeros((52, 52), dtype=np.float64) for a in self.actions}
-
-        #
-        # Probability of the player holding a hand in the public state
-        # 
-        # This is represented as a 52x52 upper triangular matrix with the diagonal entries
-        # set to zero and the entire matrix is normalized.
-        #
-        # public_cards = list of indicies corresponding to publicly observed cards
-        #
-        def random_range():
-            #
-            # Initialize an upper triangular matrix of random values 
-            # with zeros on the diagonal
-            #
-            rand_range = np.triu(np.random.rand(52, 52), k=1)
-            #
-            # Set the probability of holding public cards to zero
-            #
-            rand_range[self.public_cards, :] = 0.
-            rand_range[:, self.public_cards] = 0.
-            #
-            # Normalize
-            #
-            rand_range /= rand_range.sum()
-
-            return rand_range
-        #
-        # Note - state['raw_obs']['public_cards'] is a vector of Card objects
-        #
-        self.public_cards = [card.to_int() for card in self.public_state['raw_obs']['public_cards']]
-        self.ranges = [
-                        random_range() if i != pid else player_range 
-                        for i in range(nplayers)
-                      ]
+from rlcard.agents.gt_cfr_agent.nodes import CFRNode
 
 class GTCFRAgent():
     #
@@ -136,12 +48,8 @@ class GTCFRAgent():
         # Note: sometimes refered to as the 'c' paramter
         self.n_expansions_per_regret_updates = 0.01
 
-    #
-    # Given a state node in the public state tree,
-    # compute the updated cfr values, cfr regrets, and
-    # policies for each infoset in the public state.
-    #
-    def cfr_values(self, node : StateNode):
+    
+    def cfr_values(self, node : CFRNode):
         #
         # Base case - the given node is a leaf node
         #
@@ -151,64 +59,18 @@ class GTCFRAgent():
             # return the corresponding utilities.
             #
             if self.env.is_over():
-                #
-                # Note: No actions are taken at terminal states so we do
-                #       not need to update regrets or strategies here.
-                #
-                #
-                # Get the set of possible cards in the player's hands
-                #
-                possible_cards = list(filter(lambda x: x not in node.public_cards, range(52)))
-                #
-                # Remember the actual cards the players have
-                #
-                true_hands = [self.env.game.players[i].hand for i in range(node.nplayers)]
-                #
-                # Iterate over all possible hands in this infoset
-                #
-                for i, card1 in enumerate(possible_cards):
-                    for card2 in possible_cards[i+1:]:
-                        #
-                        # NOTE - This section needs to be rewritten for more than 2 players
-                        #
-
-                        #
-                        # Hypothetical opponent hand
-                        #
-                        hypot_hand = (card1, card2)
-                        #
-                        # Set hypothetical hand to player 2 and get payoffs
-                        #
-                        self.env.game.players[1] = hypot_hand
-                        #
-                        # Get utilities for this hypothetical hand combination
-                        #
-                        utils = self.env.game.get_payoffs()
-                        #
-                        # Player 1's value for this hypothetical opponent hand is equal
-                        # to the returned payoff weighted by the probability of the
-                        # oponent holding the hand.
-                        #
-                        node.cfr_values[0][card1, card2] = node.ranges[1][card1, card2] * utils[0]
-                        #
-                        # Reset Player 2's hand to its true value
-                        #
-                        self.env.game.players[1] = true_hands[1]
-                        #
-                        # Repeat the steps for Player 2's values
-                        #
-                        self.env.game.players[0] = hypot_hand
-                        utils = self.env.game.get_payoffs()
-                        node.cfr_values[1][card1, card2] = node.ranges[0][card1, card2] * utils[1]
-                        self.env.game.players[0] = true_hands[0]
+                
+                
             #
             # TODO - handle chance nodes
             #
             elif
 
 
+    #
     # Public tree counterfactual regret minimization
     # cfr starts on the root state, self.root
+    #
     def cfr(self):
         #
         # Run for a fixed number of value updates on the tree.
@@ -293,9 +155,16 @@ class GTCFRAgent():
         TODO - impliment this part
         """
         #
+        # Set the global information with in the CFR tree
+        #
+        hands = []
+        for pid in range(nplayers):
+            hands.append(self.env.get_state(pid)['raw_obs']['public_cards'])
+        CFRNode.set_hands(hands)
+        #
         # Initialize the root node of the public game tree
         #
-        self.root = StateNode(root_state, root_player, nplayers)
+        self.root = CFRNode(root_state, root_player, nplayers)
         #
         # Initialize the root node's public state node children
         #

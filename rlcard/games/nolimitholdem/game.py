@@ -42,8 +42,10 @@ class NolimitholdemGame(Game):
         #
         # Rig dealt cards
         #
-
+        
+        #
         # Set to insure the same card isn't dealt twice
+        #
         observed_cards = set()
         
         #
