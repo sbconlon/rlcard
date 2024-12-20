@@ -62,7 +62,7 @@ class NolimitholdemGame(Game):
 
         #
         # Fix the cards that will be dealt to each player
-        # fixed_player_cards: player_num -> [Card1, Card2]
+        # fixed_player_cards: player_id -> [Card1, Card2]
         #
         assert(isinstance(fixed_player_cards, dict))
         assert(len(fixed_player_cards) < num_players)

@@ -19,12 +19,21 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 # Internal imports
-from rlcard.games.nolimitholdem.game import NolimitholdemGame
+from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
 
 #
 # Abstract base class for a node in the CFR public tree
 #
-#   Two critical functions:
+#   Information that is universally neccessary across all node types:
+#
+#       - public_state - dictionary with public state information
+#                        (public cards, pot, player chip stacks, etc.)
+#
+#       - active_players - boolean list of which player's are still active in the game.
+#                          (if a player folds, then they're out of the game)
+#                          NOTE - what if a player is all-in?
+#
+#   Two abstract functions:
 #
 #       - values() - using CFR, compute the players' regret values and the acting player's policy.
 #
@@ -33,6 +42,7 @@ from rlcard.games.nolimitholdem.game import NolimitholdemGame
 #
 class CFRNode(ABC):
 
+    """
     #
     # Use global variables that are shared across nodes
     # to store private information that does not change across
@@ -50,42 +60,78 @@ class CFRNode(ABC):
     #
     # Neccessary for determining the winner of a showdown
     #
+    for now, this is replaced by self.game.players[id].hand
     hands = None
+    """
 
     #
-    # NOTE - how much of this information should be stored here versus kept in env?
+    # NOTE - How to relate nodes to their corresponding game representations
     #
-    def __init__(self, public_state : dict, 
-                       nplayers : int, 
+    #        Q: How much game information should be stored in each node?
+    #
+    #        A1: Current solution - store the entire game object
+    #
+    #        A2: Future solution- store only critical information, then use this 
+    #                             info to create a NolimitHoldem game instance when we need to
+    #                             (ex. when we need to determine payouts)
+    #
+    def __init__(self, game : NolimitholdemGame,
                        player_range : np.array, 
-                       opponent_values : dict, 
-                       pid : int = -1, 
-                       actions : list = None):
+                       opponent_values : dict,   # Note - (i think) this should be moved to decision+chance classes
+                       pid : int = -1,           # Note - this should be moved to decision+chance classes
+                       actions : list = None):   # Note - this should be moved to decision+chance classes
+        #
+        # Game object associated with this node.
+        #
+        # Contains all game state info as well as game logic.
+        #
+        self.game = game
+
         #
         # Public state for this node
         #
+        """ 
+        for now, replaced by c.game.get_state()
         self.public_state = public_state
+        """
 
         #
         # Player id for the player making the decision
         #
         # -1 if this is a decision or terminal node
         #
+        """
+        for now, this is replaced by self.game.game_pointer
         self.pid = pid
+        """
 
         #
-        # Number of players
+        # List of players that are still active in this hand
         #
-        # NOTE - for 2 player games this is always 2, but could be different if
-        #        this were a >2 player game.
+        #  active_player[pid] = 
         #
-        self.nplayers = nplayers
+        # There must always be one player that is active in a hand
+        #
+        # NOTE - I think this will only be used during showdowns 
+        #
+        """
+        for now, this is replaced by game.players[pid].status
+        self.player_statuses = player_statuses
+        """
+
+        #
+        # Total number of players
+        #
+        """
+        for now, this is replaced by self.game.num_players
+        self.nplayers = len(active_players)
+        """
 
         #
         # List of legal actions
         #
         #  - Decision node - 
-        #  This is the set of legal actions that can be taken by player pid.
+        #  This is the set of legal actions that can be taken by the player making the decision.
         #
         #  - Chance node -
         #  This is the set of cards that can be dealt given the public state.
@@ -94,7 +140,11 @@ class CFRNode(ABC):
         #  None. This is the end of the game so no decisions need to be made.
         #
         #self.actions = self.public_state['raw_obs']['legal_actions']
+        """
+        for now, this is replaced by self.game.get_legal_actions()
         self.actions = actions
+        """
+        self.actions = self.game.get_legal_actions()
 
         #
         #  *IMPORTANT* - If an action is selected in the tree, then the game
@@ -105,7 +155,7 @@ class CFRNode(ABC):
         #
         # Child states that result from taking an action in this state
         #
-        # Equal to None if this is a terminal node.
+        # Equal to None if this is a terminal node. (get rid of this)
         #
         self.children = {a: None for a in self.actions} if self.actions else None
         
@@ -135,7 +185,7 @@ class CFRNode(ABC):
         #
         # The input opponent values are taken as gadget values, this is to account
         # for the fact that the opponent can steer the game away from this public state
-        # if she chooses to.
+        # if she chooses.
         #
         # The values computed by cfr for both players are initialized to zero.
         #
@@ -172,12 +222,14 @@ class CFRNode(ABC):
         #
         # Note - state['raw_obs']['public_cards'] is a vector of Card objects
         #
-        self.public_cards = [card.to_int() for card in self.public_state['raw_obs']['public_cards']]
+        self.public_cards = [card.to_int() for card in self.game.public_cards]
         self.ranges = [
                         random_range() if i != pid else player_range 
-                        for i in range(nplayers)
+                        for i in range(self.game.num_players)
                       ]
-    
+    """
+    For now, we don't need this because the game object is stored in the node
+
     #
     # Helper function
     #
@@ -188,8 +240,17 @@ class CFRNode(ABC):
     # for nolimitholdem, such as get_payoffs()
     #
     def to_game(self) -> NolimitholdemGame:
-        
-        return 
+        #
+        # Initialize a NolimitholdemGame object using the information
+        # stored in this node.
+        #
+        game = NolimitholdemGame(
+                    num_players=self.nplayers,
+                    fixed_public_cards=self.public_state['raw_obs']['public_cards'],
+
+                )
+        return
+    """
 
     #
     # Compute the CFR values for this node
@@ -205,6 +266,10 @@ class CFRNode(ABC):
     def grow(self):
         pass
 
+    """
+    For now this is commented out becuase the full game object
+    is being stored in the node class
+
     #
     # Set player's hands for the class
     #
@@ -218,7 +283,7 @@ class CFRNode(ABC):
     @classmethod
     def get_hands(cls):
         return cls.hands
-        
+    """        
 
 
 #
@@ -255,8 +320,7 @@ class TerminalNode(CFRNode):
     #
     # Only store the information neccessary for computing player payoffs.
     #
-    def __init__(self, public_state : dict, 
-                       nplayers : int, 
+    def __init__(self, game : NolimitholdemGame, 
                        player_range : np.array, 
                        opponent_values : dict):
         #
@@ -264,7 +328,7 @@ class TerminalNode(CFRNode):
         #
         # All other values are set to defaults
         #
-        super.__init__(self, public_state, nplayers, player_range, opponent_values)
+        super.__init__(self, game, player_range, opponent_values)
 
     #
     # Given a state node in the public state tree, compute the updated cfr values, 
