@@ -321,8 +321,6 @@ class TerminalNode(CFRNode):
         for pid, hand in enumerate(real_hands):
             self.game.players[pid].hand = hand
 
-
-
     #
     # Given a state node in the public state tree, compute the updated cfr values, 
     # cfr regrets, and policies for each infoset in the public state.
@@ -334,25 +332,11 @@ class TerminalNode(CFRNode):
     #
     # The player's values at terminal nodes are their expected payoffs
     #
-    #
-    # NOTE 1 - This section needs to be rewritten for more than 2 players
-    #
-    # NOTE 2 - We can cache the payouts in a matrix. We do not need to re-compute
-    #          them every time a value update is made because the only things that
-    #          change are the player's ranges.
-    #
-    # NOTE 3 - Does this need to be changed? Shouldn't the expected value be
-    #
-    #          values[pid, card1, card2] = sum_{card3, card4} payoff(pid=(card1, card2), opp=(card3, card4)) * range[opp, card3, card4]
-    #
-    #          i.e. we need the set of values for the player over all hands in the infoset.
+    # values[pid, card1, card2] = sum(payoff[pid, card1, card2, :, :] * range[opp, :, :])
     #
     def update_values(self):
         #
-        # For each player,
-        # iterate over all possible hands in this infoset ...
-        #
-        # values
+        # For each player...
         #
         for pid in range(self.game.num_players):
             #
@@ -364,46 +348,10 @@ class TerminalNode(CFRNode):
             #
             opp_pid = (pid + 1) % 2
             #
-            # Remember the opponent's acutal hand
+            # Compute the expected value matrix
             #
-            real_opp_hand = self.game.players[opp_pid]
-            #
-            # Get the set of possible cards the opponent can have in their hand
-            #
-            # The player knows the opponent cant have a card that's on the board or
-            # in their own hand.
-            #
-            card_mask = lambda x: not (x in self.game.public_cards or x in self.game.players[pid].hand)
-            possible_cards = list(filter(card_mask, range(52)))
-            #
-            # For each possible hand the opponent could have...
-            #
-            for i, card1 in enumerate(possible_cards):
-                for card2 in possible_cards[i+1:]:
-                    #
-                    # Hypothetical opponent hand
-                    #
-                    hypot_opp_hand = (card1, card2)
-                    #
-                    # Set the opponent's hand 
-                    #
-                    self.game.players[opp_pid].hand = hypot_opp_hand
-                    #
-                    # Get utilities for this hypothetical hand combination
-                    #
-                    utils = self.game.get_payoffs()
-                    #
-                    # Player 1's value for this hypothetical opponent hand is equal
-                    # to the returned payoff weighted by the probability of the
-                    # oponent holding that hand.
-                    #
-                    # NOTE - see NOTE 3 above
-                    #
-                    self.values[pid, card1, card2] = self.player_ranges[opp_pid] * utils[pid]
-            #
-            # Reset the opponent's hand to its actual value
-            #
-            self.game.players[opp_pid].hand = real_opp_hand
+            self.values[pid] = (self.payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
+
 
 class DecisionNode(CFRNode):
 
@@ -484,11 +432,6 @@ class DecisionNode(CFRNode):
     # Perform a CFR value update
     #
     def update_values(self):
-        #
-        # Initalize player's values to zero
-        #
-        self.zero_values()
-
         #
         # For each child node...
         #
