@@ -16,6 +16,7 @@
 
 # External imports
 from abc import ABC, abstractmethod
+import copy
 from itertools import permutations, combinations
 import numpy as np
 from sparse import COO
@@ -119,7 +120,7 @@ class CFRNode(ABC):
         # set to zero
         #
         # values[pid, card1, card2] 
-        #     = player pid's expected value given that they're in this state 
+        #     = the expected value for player pid holding hand=(card1, card2) 
         #
         # All player's values are initialized to zero.
         #
@@ -334,6 +335,7 @@ class TerminalNode(CFRNode):
     #
     # values[pid, card1, card2] = sum(payoff[pid, card1, card2, :, :] * range[opp, :, :])
     #
+    #
     def update_values(self):
         #
         # For each player...
@@ -433,10 +435,68 @@ class DecisionNode(CFRNode):
     #
     def update_values(self):
         #
+        # Player id for the acting player
+        #
+        # Note - game_pointer holds the player id of the player making the decision
+        #
+        pid = self.game.game_pointer
+        #
+        # Initialize the player's values to zero
+        #
+        self.zero_values()
+        #
         # For each child node...
         #
-        for action in self.actions:
+        for action, child in enumerate(self.children):
             #
-            # Update the ranges for the acting player in the child
-            # states, according to the 
+            # If the child node is in the tree...
             #
+            if child:
+                #
+                # Update the ranges for the acting player in the child
+                # states, according to the acting player's strategy.
+                #
+                # For the acting player,
+                # 
+                # prob. of reaching child node 
+                #     = prob. of reaching parent node * prob. of selecting action A
+                # 
+                # where action A transitions the game from the parent to the child node.
+                #
+                # 
+                # For the non-acting player,
+                #
+                # range at child node = range at parent node
+                #
+                child.player_ranges = np.copy(self.player_ranges)
+                child.player_ranges[pid] = self.strategy[action] * self.player_ranges[pid]
+                #
+                # Compute the value of the child node
+                #
+                child.update_values()
+                #
+                # Use the child's values to update the parent's values
+                #
+                # For the acting player,
+                #
+                # the value contribution associated with selecting this action is
+                # equal to the value of the child state weighted by the acting player's
+                # probability of selecting the action
+                #
+                self.values[pid] += self.strategy[action] * child.values[pid]
+                #
+                # For the non-acting players,
+                #
+                # the player's value in the parent node is simply a sum of the 
+                # player's values in the child nodes.
+                #
+                for opp_pid in [x for x in range(self.game.num_players) if x != pid]:
+                    self.values[opp_pid] += child.values[opp_pid]
+            #
+            # Else, 
+            # 
+            # The child is not in the tree and we need to use the cvfn to estimate it. 
+            #
+            else:
+                pass
+                
