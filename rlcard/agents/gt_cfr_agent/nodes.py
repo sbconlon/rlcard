@@ -491,7 +491,7 @@ class DecisionNode(CFRNode):
                 # player's values in the child nodes.
                 #
                 for opp_pid in range(self.game.num_players):
-                    if opp_pid != pid
+                    if opp_pid != pid:
                         self.values[opp_pid] += child.values[opp_pid]
             #
             # Else, 
