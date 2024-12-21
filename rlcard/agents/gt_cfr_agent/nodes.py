@@ -490,12 +490,13 @@ class DecisionNode(CFRNode):
                 # the player's value in the parent node is simply a sum of the 
                 # player's values in the child nodes.
                 #
-                for opp_pid in [x for x in range(self.game.num_players) if x != pid]:
-                    self.values[opp_pid] += child.values[opp_pid]
+                for opp_pid in range(self.game.num_players):
+                    if opp_pid != pid
+                        self.values[opp_pid] += child.values[opp_pid]
             #
             # Else, 
             # 
-            # The child is not in the tree and we need to use the cvfn to estimate it. 
+            # The child is not in the tree and we need to use the cfvn to estimate it. 
             #
             else:
                 pass
