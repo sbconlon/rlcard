@@ -3,7 +3,8 @@ import numpy as np
 import random
 
 from rlcard.envs.nolimitholdem import NolimitholdemEnv
-from rlcard.agents.gt_cfr_agent.nodes import CFRNode
+from rlcard.agents.gt_cfr_agent.nodes import DecisionNode
+from rlcard.agents.gt_cfr_agent.utils import rand_value, initial_hand_values
 
 class GTCFRAgent():
     #
@@ -48,24 +49,8 @@ class GTCFRAgent():
         # Note: sometimes refered to as the 'c' paramter
         self.n_expansions_per_regret_updates = 0.01
 
-    
-    def cfr_values(self, node : CFRNode):
-        #
-        # Base case - the given node is a leaf node
-        #
-        if not any([child for child in node.children]):
-            #
-            # If this node is a terminal state in the game, then
-            # return the corresponding utilities.
-            #
-            if self.env.is_over():
-                
-                
-            #
-            # TODO - handle chance nodes
-            #
-            elif
-
+    def update_gadget_regrets(self):
+        pass
 
     #
     # Public tree counterfactual regret minimization
@@ -77,9 +62,13 @@ class GTCFRAgent():
         #
         for t in range(math.ceil(1/self.n_expansions_per_regret_updates)):
             #
-            # Get the values for each player in this public state
+            # Perform one iteration of value and strategy updates on the game tree
             #
-            values = self.cfr_values(self.root)
+            self.root.update_values()
+            #
+            # Update gadget regrets
+            #
+            self.update_gadget_regrets()
 
     # Add a leaf node to the game tree
     def grow(self):
@@ -102,23 +91,32 @@ class GTCFRAgent():
             #
             self.grow()
 
+    #
     # Wrapper function around gt-cfr to handle fully solving a 
     # subset of cfvn queries made during gt-cfr
+    #
     def training_gt_cfr(self):
+        #
         # Check starting game tree
         # We start with a root node and its children
+        #
         assert(self.root)
         assert(all([self.root.children[a] for a in self.root.actions]))
-
+        
+        #
         # Run gt-cfr
+        #
         values, policy, queries = self.gt_cfr()
-
+        
+        #
         # Fully solve a subset of cvpn queries from this gt_cfr run
+        #
         for q in queries:
             if random.random() < self.prob_query_solve:
                 self.queries_to_solve.append(q)
-        
+        #
         # Return gt-cfr results
+        #
         return values, policy
     
     #
@@ -126,24 +124,25 @@ class GTCFRAgent():
     #
     def init_game_tree(self):
         #
-        # Get state info from the game environment
-        #
-        root_player = self.env.get_player_id()
-        root_state = self.env.get_state(root_player)
-        nplayers = self.env.num_players
-        #
-        # Compute the player's range at the root state
+        # Compute the decision player's range at the root state
         #
         #     Case 1: This is the start of the game. The player's
         #     range is the probability of being dealt each hand comination.
         #
         #     Case 2: This is not the start of the game. Use the player's range from the
         #     previous CFR run.
+        #
+        # The opponent players' ranges can be randomized.
+        #
         """
         TODO - impliment this part
         """
+        player_ranges = np.zeros((self.env.game.num_players, 52, 52)) # NOTE - PLACE FILLER
         #
-        # Compute the opponent player's counterfactual values at the root state
+        # Compute the intial gadget values for the opposing players
+        #
+        # This is to account for the fact that the opponents can steer the game 
+        # away from this public state if they choose to.
         #
         #     Case 1: This is the start of the game. We need to use a heuristic
         #     to estimate the player's values. This can be done by precomputing the
@@ -151,20 +150,20 @@ class GTCFRAgent():
         #
         #     Case 2: This is not the start of the game. Use the opponent players' values
         #     from the previous CFR run.
+        #
         """
         TODO - impliment this part
         """
+        gadget_regrets = np.zeros(len(self.env.game.get_legal_actions()))
+        gadget_values = np.zeros((self.env.game.num_players, 52, 52)) # NOTE - PLACE FILLER
         #
-        # Set the global information with in the CFR tree
+        # Initialize the player's CFR values to zero.
         #
-        hands = []
-        for pid in range(nplayers):
-            hands.append(self.env.get_state(pid)['raw_obs']['public_cards'])
-        CFRNode.set_hands(hands)
+        player_values = np.zeros((self.env.game.num_players, 52, 52))
         #
         # Initialize the root node of the public game tree
         #
-        self.root = CFRNode(root_state, root_player, nplayers)
+        self.root = DecisionNode(self.env.game, player_ranges, player_values)
         #
         # Initialize the root node's public state node children
         #

@@ -26,6 +26,9 @@ from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
 #
 #   Information that is universally neccessary across all node types:
 #
+#       - game - NolimitholdemGame object containing all information pertaining to the 
+#                node's game state.
+"""
 #       - public_state - dictionary with public state information
 #                        (public cards, pot, player chip stacks, etc.)
 #
@@ -33,11 +36,13 @@ from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
 #                          (if a player folds, then they're out of the game)
 #                          NOTE - what if a player is all-in?
 #
+"""
+#
 #   Two abstract functions:
 #
-#       - values() - using CFR, compute the players' regret values and the acting player's policy.
+#       - update_values() - using CFR, compute the players' regret values and the acting player's policy.
 #
-#       - grow() - add children nodes according to Growing-Tree CFR
+#       - grow() - add a child node to this node's subtree according to the Growing-Tree CFR algo
 #
 #
 class CFRNode(ABC):
@@ -73,184 +78,22 @@ class CFRNode(ABC):
     #
     #        A2: Future solution- store only critical information, then use this 
     #                             info to create a NolimitHoldem game instance when we need to
-    #                             (ex. when we need to determine payouts)
+    #                             Examples. 
+    #                                 - to determine payouts
+    #                                 - to use knowledge of the game dynamics
+    #                                   when adding a new node to the tree
     #
-    def __init__(self, game : NolimitholdemGame,
-                       player_range : np.array, 
-                       opponent_values : dict,   # Note - (i think) this should be moved to decision+chance classes
-                       pid : int = -1,           # Note - this should be moved to decision+chance classes
-                       actions : list = None):   # Note - this should be moved to decision+chance classes
+    def __init__(self, game : NolimitholdemGame):
         #
         # Game object associated with this node.
         #
         # Contains all game state info as well as game logic.
         #
+        # Note - It is the caller's responsibility to ensure that this is always
+        #        a deep copy to prevent other nodes from modifying this node's game 
+        #        information.
+        #
         self.game = game
-
-        #
-        # Public state for this node
-        #
-        """ 
-        for now, replaced by c.game.get_state()
-        self.public_state = public_state
-        """
-
-        #
-        # Player id for the player making the decision
-        #
-        # -1 if this is a decision or terminal node
-        #
-        """
-        for now, this is replaced by self.game.game_pointer
-        self.pid = pid
-        """
-
-        #
-        # List of players that are still active in this hand
-        #
-        #  active_player[pid] = 
-        #
-        # There must always be one player that is active in a hand
-        #
-        # NOTE - I think this will only be used during showdowns 
-        #
-        """
-        for now, this is replaced by game.players[pid].status
-        self.player_statuses = player_statuses
-        """
-
-        #
-        # Total number of players
-        #
-        """
-        for now, this is replaced by self.game.num_players
-        self.nplayers = len(active_players)
-        """
-
-        #
-        # List of legal actions
-        #
-        #  - Decision node - 
-        #  This is the set of legal actions that can be taken by the player making the decision.
-        #
-        #  - Chance node -
-        #  This is the set of cards that can be dealt given the public state.
-        #
-        #  - Terminal node -
-        #  None. This is the end of the game so no decisions need to be made.
-        #
-        #self.actions = self.public_state['raw_obs']['legal_actions']
-        """
-        for now, this is replaced by self.game.get_legal_actions()
-        self.actions = actions
-        """
-        self.actions = self.game.get_legal_actions()
-
-        #
-        #  *IMPORTANT* - If an action is selected in the tree, then the game
-        #                is deterministicly transitioned from this node to the 
-        #                child node associated with that action.
-        #
-        
-        #
-        # Child states that result from taking an action in this state
-        #
-        # Equal to None if this is a terminal node. (get rid of this)
-        #
-        self.children = {a: None for a in self.actions} if self.actions else None
-        
-        #
-        # Player's probability distribution over actions in this state
-        # initalized to a random strategy.
-        #
-        random_strategy = np.random.rand(len(self.actions))
-        random_strategy /= random_strategy.sum()
-        self.strategy = dict(zip(self.actions, random_strategy))
-        
-        #
-        # Regret values over possible player actions
-        #
-        self.regrets  = {a: 0. for a in self.actions}
-
-        #
-        # Regret values for the range gadget
-        #
-        self.gadget_regrets = {a: 0. for a in self.actions}
-        
-        #
-        # CFR value of holding each possible hand according to the current strategy profile
-        #
-        # This is represented as a 52x52 upper triangular matrix with the diagonal entries
-        # set to zero
-        #
-        # The input opponent values are taken as gadget values, this is to account
-        # for the fact that the opponent can steer the game away from this public state
-        # if she chooses.
-        #
-        # The values computed by cfr for both players are initialized to zero.
-        #
-        # Note: the goal of CFR is to compute the active player's values.
-        #
-        self.gadget_values = opponent_values
-        self.cfr_values = {a: np.zeros((52, 52), dtype=np.float64) for a in self.actions}
-
-        #
-        # Probability of the player holding a hand in the public state
-        # 
-        # This is represented as a 52x52 upper triangular matrix with the diagonal entries
-        # set to zero and the entire matrix is normalized.
-        #
-        # public_cards = list of indicies corresponding to publicly observed cards
-        #
-        def random_range():
-            #
-            # Initialize an upper triangular matrix of random values 
-            # with zeros on the diagonal
-            #
-            rand_range = np.triu(np.random.rand(52, 52), k=1)
-            #
-            # Set the probability of holding public cards to zero
-            #
-            rand_range[self.public_cards, :] = 0.
-            rand_range[:, self.public_cards] = 0.
-            #
-            # Normalize
-            #
-            rand_range /= rand_range.sum()
-
-            return rand_range
-        #
-        # Note - state['raw_obs']['public_cards'] is a vector of Card objects
-        #
-        self.public_cards = [card.to_int() for card in self.game.public_cards]
-        self.ranges = [
-                        random_range() if i != pid else player_range 
-                        for i in range(self.game.num_players)
-                      ]
-    """
-    For now, we don't need this because the game object is stored in the node
-
-    #
-    # Helper function
-    #
-    # Takes the node's state information 
-    # and returns a corresponding game instance.
-    #
-    # This is useful for leveraging rlcard's built-in functions
-    # for nolimitholdem, such as get_payoffs()
-    #
-    def to_game(self) -> NolimitholdemGame:
-        #
-        # Initialize a NolimitholdemGame object using the information
-        # stored in this node.
-        #
-        game = NolimitholdemGame(
-                    num_players=self.nplayers,
-                    fixed_public_cards=self.public_state['raw_obs']['public_cards'],
-
-                )
-        return
-    """
 
     #
     # Compute the CFR values for this node
@@ -265,26 +108,6 @@ class CFRNode(ABC):
     @abstractmethod
     def grow(self):
         pass
-
-    """
-    For now this is commented out becuase the full game object
-    is being stored in the node class
-
-    #
-    # Set player's hands for the class
-    #
-    @classmethod
-    def set_hands(cls, player_hands : list):
-        cls.hands = player_hands
-    
-    #
-    # Get player's hands for the class
-    #
-    @classmethod
-    def get_hands(cls):
-        return cls.hands
-    """        
-
 
 #
 # Terminal Node
@@ -320,15 +143,38 @@ class TerminalNode(CFRNode):
     #
     # Only store the information neccessary for computing player payoffs.
     #
-    def __init__(self, game : NolimitholdemGame, 
-                       player_range : np.array, 
-                       opponent_values : dict):
+    # NOTE - right now, we store the entire game object
+    #
+    def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
         #
         # Use the inherited initialization function
         #
         # All other values are set to defaults
         #
-        super.__init__(self, game, player_range, opponent_values)
+        super.__init__(self, game)
+        #
+        # Poker games are terminated with showdowns
+        #
+        assert(self.game.stage == Stage.SHOWDOWN) # I think this is correct?
+        #
+        # Probability distribution over hands, for each player
+        #
+        # player_range[pid, card1, card2]
+        #    = prob. player pid reaches this terminal node with hand (card1, card2)
+        #
+        # * IMPORTANT *
+        # The np.array is stored by reference, and given to the terminal node
+        # from its parent. Therefore, any change made to parent.player_ranges
+        # is reflected here too.
+        #
+        self.player_ranges = player_ranges
+        #
+        # Value over hands, for each player
+        #
+        # values[pid, card1, card2] 
+        #     = exp. payoff for player pid when holding hand (card1, card2)
+        #
+        self.cfr_values = np.zeros((self.game.num_players, 52, 52))
 
     #
     # Given a state node in the public state tree, compute the updated cfr values, 
@@ -349,7 +195,7 @@ class TerminalNode(CFRNode):
         # For each player,
         # iterate over all possible hands in this infoset ...
         #
-        for pid in range(self.nplayers):
+        for pid in range(self.game.num_players):
             #
             # Using 'current player' to refer to the player whose values
             # we are computing at this iteration
@@ -359,12 +205,16 @@ class TerminalNode(CFRNode):
             #
             opp_pid = (pid + 1) % 2
             #
+            # Remember the opponent's acutal hand
+            #
+            real_opp_hand = self.game.players[opp_pid]
+            #
             # Get the set of possible cards the opponent can have in their hand
             #
             # The player knows the opponent cant have a card that's on the board or
             # in their own hand.
             #
-            card_mask = lambda x: not (x in self.public_cards or x in CFRNode.get_hands[pid])
+            card_mask = lambda x: not (x in self.game.public_cards or x in self.game.players[pid].hand)
             possible_cards = list(filter(card_mask, range(52)))
             #
             # For each possible hand the opponent could have...
@@ -376,22 +226,143 @@ class TerminalNode(CFRNode):
                     #
                     hypot_opp_hand = (card1, card2)
                     #
-                    # Initialize a nolimitholdem game instance for this hypothetical
-                    # setup to determine the payoff.
+                    # Set the opponent's hand 
                     #
-                    hypot_hands = [None, None]
-                    hypot_hands[pid] = CFRNode.get_hands[pid]
-                    hypot_hands[opp_pid] = hypot_opp_hand
-                    hypot_game = self.to_game(hypot_opp_hand)
+                    self.game.players[opp_pid].hand = hypot_opp_hand
                     #
                     # Get utilities for this hypothetical hand combination
                     #
-                    utils = hypot_game.get_payoffs()
+                    utils = self.game.get_payoffs()
                     #
                     # Player 1's value for this hypothetical opponent hand is equal
                     # to the returned payoff weighted by the probability of the
                     # oponent holding that hand.
                     #
-                    self.cfr_values[pid][card1, card2] = self.ranges[opp_pid][card1, card2] * utils[pid]
+                    self.cfr_values[pid][card1, card2] = self.player_ranges[opp_pid] * utils[pid]
+            #
+            # Reset the opponent's hand to its actual value
+            #
+            self.game.players[opp_pid].hand = real_opp_hand
 
+
+
+class DecisionNode(CFRNode):
+
+    def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
+        #
+        # Start with the abstract class's initialization function
+        #
+        super().__init__(game)
         
+        #
+        # Player ranges are the probability that each player reaches this state,
+        # under the current strategy profile, given a certain hand.
+        #
+        # For each player, this is expressed as a 52x52 upper triangular matrix,
+        #
+        # player_ranges[pid, card1, card2]
+        #     = prob. player pid reaches this state, under the current strategy profile,
+        #       given that they have the hand (card1, card2)
+        #
+        self.player_ranges = player_ranges
+        
+        #
+        # List of legal actions
+        #
+        # This is the set of legal actions that can be taken by the player making the decision.
+        #
+        self.actions = self.game.get_legal_actions()
+
+        #
+        #  *IMPORTANT* - If an action is selected in the tree, then the game
+        #                is deterministicly transitioned from this node to the 
+        #                child node associated with that action.
+        #
+
+        #
+        # Child states that result from taking an action in this state
+        #
+        # Equal to None if this is a terminal node. (get rid of this)
+        #
+        self.children = {a: None for a in self.actions} if self.actions else None
+
+        #
+        # The acting player's probability distribution over actions for all possible
+        # hand combinations, given the public information.
+        #
+        # strategy[action, card1, card2] 
+        #     = prob. of the acting player selecting the action 
+        #       given she's holding the hand (card1, card2)
+        #
+        # Note - computing strategies for hands we don't have is neccessary for
+        #        propagating the player's range down the game tree.
+        #
+        #
+        # Start with an array of random values
+        #
+        self.strategy = np.random.rand(len(self.actions), 52, 52)
+
+        #
+        # Set duplicate card pairs to zero.
+        #
+        # i.e. we only need to track values for (card1, card2)
+        #      and can set (card2, card1) to zero. 
+        #
+        for action in range(len(self.actions)):
+            self.strategy[action, :, :] = np.triu(self.strategy[action, :, :], k=1)
+
+        #
+        # Set probabilities associated with hands containing public cards equal to zero
+        #
+        for card in self.game.public_cards:
+            for action in range(len(self.actions)):
+                self.strategy[action, card.to_int(), :] = 0.
+                self.strategy[action, :, card.to_int()] = 0.
+
+        #
+        # Normalize the stategy
+        #
+        sum_values = self.strategy.sum(axis=0, keepdims=True)
+        sum_values[sum_values == 0] = 1
+        self.strategy /= sum_values
+
+        #
+        # Regret values over possible player actions for each hand in the infoset.
+        #
+        # Represented as an upper triangular matrix with zeros along the diagonal.
+        #
+        self.regrets  = np.zeros(len(self.actions), 52, 52)
+
+        #
+        # CFR value of holding each possible hand according to the current strategy profile
+        #
+        # This is represented as a 52x52 upper triangular matrix with the diagonal entries
+        # set to zero
+        #
+        # values[pid, card1, card2] 
+        #     = player pid's expected value given that they're in this state 
+        #
+        # All player's values are initialized to zero.
+        #
+        self.zero_values()
+
+    #
+    # Helper function - set values to zero.
+    #
+    def zero_values(self):
+        self.values = np.zeros((self.game.num_players, 52, 52), dtype=np.float64)
+
+    #
+    # Perform a CFR value update
+    #
+    def update_values(self):
+        #
+        # Initalize player's values to zero
+        #
+        self.zero_values()
+
+        #
+        # For each child node...
+        #
+        for action in self.actions:
+
