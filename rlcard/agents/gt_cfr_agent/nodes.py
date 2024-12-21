@@ -18,6 +18,7 @@
 from abc import ABC, abstractmethod
 from itertools import permutations, combinations
 import numpy as np
+from sparse import COO
 
 # Internal imports
 from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
@@ -191,23 +192,12 @@ class TerminalNode(CFRNode):
         # Poker games are terminated with showdowns
         #
         assert(self.game.stage == Stage.SHOWDOWN) # I think this is correct?
-        """
-        --> for now, each node will get its own copy of ranges that will be
-            updated by their parent node during the value update phase.
-
         #
-        # Probability distribution over hands, for each player
+        # Compute the payoff matrix for this node.
         #
-        # player_range[pid, card1, card2]
-        #    = prob. player pid reaches this terminal node with hand (card1, card2)
+        # Store it in memory for fast computation update_values() function.
         #
-        # * IMPORTANT *
-        # The np.array is stored by reference, and given to the terminal node
-        # from its parent. Therefore, any change made to parent.player_ranges
-        # is reflected here too.
-        #
-        self.player_ranges = player_ranges
-        """
+        self.cache_payoffs()
         #
         # Value over hands, for each player
         #
@@ -215,7 +205,7 @@ class TerminalNode(CFRNode):
         #
         #     = exp. payoff for player pid when holding hand (card1, card2)
         #
-        #     = 
+        #     = sum_{card3, card4} opp_range[card2, card3] * payoff[pid, card1, card2, card3, card4] 
         #
         self.values = np.zeros((self.game.num_players, 52, 52))
 
@@ -257,6 +247,22 @@ class TerminalNode(CFRNode):
     #          Payoff matrix size
     #              = (2 * 52^4 approx. 14 mil entries) * 8 bytes = approx. 136 MB
     #
+    #          Most GPUs have at least 4 GB of VRAM so it should fit comfortably.
+    #          However, we will have many terminal nodes, all with their own payoff
+    #          matrices. We will likely need to shuttle the range and payoff
+    #          matrices on/off the GPU in order to perform the value update computations.
+    #
+    #          One possible remedy would be to store a spare representation of the
+    #          payoff matrix. There are a few libraries with GPU support that could
+    #          do this. One possible solution would be to use cupy and 
+    #          cupyx.scipy.sparse.coo_matrix
+    #
+    # NOTE 4 - This solution only really works for 2 player games
+    #
+    #          This approach scales poorly with >2 players
+    #
+    #          In >2 player games, the payoffs will likely have to be computed
+    #          manually with each value_update call. Rather than being cached here.
     #
     def cache_payoffs(self):
         #
@@ -270,7 +276,7 @@ class TerminalNode(CFRNode):
         # Initialize payoffs matrix to all zeros
         #
         #
-        self.payoffs = np.zeros([self.game.num_players] + [52, 52]*self.game.num_players, np.float64)
+        self.payoffs = COO([self.game.num_players] + [52, 52]*self.game.num_players, np.float64)
         
         #
         # Get the set of possible cards 
@@ -286,7 +292,7 @@ class TerminalNode(CFRNode):
         #         = list of all possible 2 card hands
         #
         #     permulations(..., num_player) 
-        #         = list of possible hand assignments to each player
+        #         = list of all possible hand assignments to each player
         #
         for hands in permutations(combinations(possible_cards, 2), self.game.num_players):
             #
@@ -300,9 +306,20 @@ class TerminalNode(CFRNode):
             #
             hand_payoffs = self.game.get_payoffs()
             #
-            # Set payoffs 
+            # Translate cards in the hand configuration to indexes
             #
-
+            card_idxs = [idx for hand in hands for idx in [hand[0].to_int(), hand[1].to_int()]]
+            #
+            # Set each player's payoffs in the matrix
+            #
+            for pid in enumerate(hands):
+                self.payoffs[[pid] + card_idxs] = hand_payoffs[pid]
+        
+        #
+        # Restore the players' real hands in the game object
+        #
+        for pid, hand in enumerate(real_hands):
+            self.game.players[pid].hand = hand
 
 
 
@@ -334,6 +351,8 @@ class TerminalNode(CFRNode):
         #
         # For each player,
         # iterate over all possible hands in this infoset ...
+        #
+        # values
         #
         for pid in range(self.game.num_players):
             #
@@ -385,8 +404,6 @@ class TerminalNode(CFRNode):
             # Reset the opponent's hand to its actual value
             #
             self.game.players[opp_pid].hand = real_opp_hand
-
-
 
 class DecisionNode(CFRNode):
 
