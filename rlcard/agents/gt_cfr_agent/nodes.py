@@ -16,10 +16,12 @@
 
 # External imports
 from abc import ABC, abstractmethod
+from itertools import permutations, combinations
 import numpy as np
 
 # Internal imports
 from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
+from rlcard.utils.utils import init_standard_deck
 
 #
 # Abstract base class for a node in the CFR public tree
@@ -76,24 +78,57 @@ class CFRNode(ABC):
     #
     #        A1: Current solution - store the entire game object
     #
-    #        A2: Future solution- store only critical information, then use this 
-    #                             info to create a NolimitHoldem game instance when we need to
-    #                             Examples. 
-    #                                 - to determine payouts
-    #                                 - to use knowledge of the game dynamics
-    #                                   when adding a new node to the tree
+    #        A2: Future solution  - store only critical information, then use this 
+    #                               info to create a NolimitHoldem game instance when we need to
+    #                             
+    #                               Examples. 
+    #                                   - to determine payouts
+    #                                   - to use knowledge of the game dynamics
+    #                                     when adding a new node to the tree
     #
-    def __init__(self, game : NolimitholdemGame):
+    #
+    # *IMPORTANT* - It's the caller's responsibility to ensure that this is always
+    #               a deep copy to prevent other nodes from modifying this node's game 
+    #               information.
+    #
+    def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
         #
         # Game object associated with this node.
         #
         # Contains all game state info as well as game logic.
         #
-        # Note - It is the caller's responsibility to ensure that this is always
-        #        a deep copy to prevent other nodes from modifying this node's game 
-        #        information.
-        #
         self.game = game
+        
+        #
+        # Player ranges are the probability that each player reaches this state,
+        # under the current strategy profile, given a certain hand.
+        #
+        # For each player, this is expressed as a 52x52 upper triangular matrix,
+        #
+        # player_ranges[pid, card1, card2]
+        #     = prob. player pid reaches this state, under the current strategy profile,
+        #       given that they have the hand (card1, card2)
+        #
+        self.player_ranges = player_ranges
+        
+        #
+        # CFR value of holding each possible hand according to the current strategy profile
+        #
+        # This is represented as a 52x52 upper triangular matrix with the diagonal entries
+        # set to zero
+        #
+        # values[pid, card1, card2] 
+        #     = player pid's expected value given that they're in this state 
+        #
+        # All player's values are initialized to zero.
+        #
+        self.zero_values()
+    
+    #
+    # Helper function - sets values to zero.
+    #
+    def zero_values(self):
+        self.values = np.zeros((self.game.num_players, 52, 52), dtype=np.float64)
 
     #
     # Compute the CFR values for this node
@@ -151,11 +186,15 @@ class TerminalNode(CFRNode):
         #
         # All other values are set to defaults
         #
-        super.__init__(self, game)
+        super.__init__(self, game, player_ranges)
         #
         # Poker games are terminated with showdowns
         #
         assert(self.game.stage == Stage.SHOWDOWN) # I think this is correct?
+        """
+        --> for now, each node will get its own copy of ranges that will be
+            updated by their parent node during the value update phase.
+
         #
         # Probability distribution over hands, for each player
         #
@@ -168,13 +207,104 @@ class TerminalNode(CFRNode):
         # is reflected here too.
         #
         self.player_ranges = player_ranges
+        """
         #
         # Value over hands, for each player
         #
-        # values[pid, card1, card2] 
+        # values[pid, card1, card2]
+        #
         #     = exp. payoff for player pid when holding hand (card1, card2)
         #
-        self.cfr_values = np.zeros((self.game.num_players, 52, 52))
+        #     = 
+        #
+        self.values = np.zeros((self.game.num_players, 52, 52))
+
+    #
+    # Caches the payoff matrix for each hand combination
+    #
+    #  payoffs[pid, card1, card2, card3, card4, ...]
+    #      = payoff for player pid under the hand configuration
+    #        P1 hand = (card1, card2), P2 hand = (card3, card4), ...
+    #
+    #  Entries in the payoff matrix associated with public cards are set to zero.
+    #
+    #  Note - a priori
+    #
+    #         payoffs[pid, card1, card2, card3, card4] =/= payoffs[pid, card3, card4, card1, card2]
+    #
+    #         Ex - if one player folds, then it doesn't matter which cards they have, they
+    #              will always lose to the other player
+    #
+    #
+    # NOTE 1 - Should we identify when a player folded and save time evaluating payoffs
+    #          since the folding player always loses the entire pot, independent of
+    #          hand combinations.
+    #
+    #          This would also save a significant amount of memory since the (2, 52, 52, 52, 52)
+    #          matrix could be replaced by a single value (equal to the pot size).
+    #
+    # NOTE 2 - In the 2 player case, Player 1's payoff is always equal to (pot - Player 2's payoff)
+    #        
+    #          Extrapolating to >2 players, 
+    #          Player 1's payoff is always equal to (pot - sum of other players' payoffs)
+    #
+    #          We could take advantage of this to only store (num players - 1) payoffs
+    #
+    # NOTE 3 - The payoff matrix is relatively sparse.
+    #
+    #          Greater than half of the entries will always be zero.
+    #
+    #          Payoff matrix size
+    #              = (2 * 52^4 approx. 14 mil entries) * 8 bytes = approx. 136 MB
+    #
+    #
+    def cache_payoffs(self):
+        #
+        # Remember the actual hands for each player
+        #
+        # NOTE - do we care about storing their real hands in this node?
+        #
+        real_hands = [self.game.players[pid].hand for pid in range(self.game.num_players)]
+
+        #
+        # Initialize payoffs matrix to all zeros
+        #
+        #
+        self.payoffs = np.zeros([self.game.num_players] + [52, 52]*self.game.num_players, np.float64)
+        
+        #
+        # Get the set of possible cards 
+        # the players can have in their hands
+        #
+        possible_cards = [card for card in init_standard_deck() if card not in self.game.public_cards]
+
+        #
+        # For each possible hand combination...
+        #
+        # Note -
+        #     combinations(possible_cards, 2) 
+        #         = list of all possible 2 card hands
+        #
+        #     permulations(..., num_player) 
+        #         = list of possible hand assignments to each player
+        #
+        for hands in permutations(combinations(possible_cards, 2), self.game.num_players):
+            #
+            # Assign the hypothetical hands to each player in the game instance
+            #
+            for pid, hand in enumerate(hands):
+                self.game.players[pid].hand = hand
+            #
+            # Compute the payoffs for this hand configuration 
+            # in this node's game state
+            #
+            hand_payoffs = self.game.get_payoffs()
+            #
+            # Set payoffs 
+            #
+
+
+
 
     #
     # Given a state node in the public state tree, compute the updated cfr values, 
@@ -188,7 +318,17 @@ class TerminalNode(CFRNode):
     # The player's values at terminal nodes are their expected payoffs
     #
     #
-    # NOTE - This section needs to be rewritten for more than 2 players
+    # NOTE 1 - This section needs to be rewritten for more than 2 players
+    #
+    # NOTE 2 - We can cache the payouts in a matrix. We do not need to re-compute
+    #          them every time a value update is made because the only things that
+    #          change are the player's ranges.
+    #
+    # NOTE 3 - Does this need to be changed? Shouldn't the expected value be
+    #
+    #          values[pid, card1, card2] = sum_{card3, card4} payoff(pid=(card1, card2), opp=(card3, card4)) * range[opp, card3, card4]
+    #
+    #          i.e. we need the set of values for the player over all hands in the infoset.
     #
     def update_values(self):
         #
@@ -238,7 +378,9 @@ class TerminalNode(CFRNode):
                     # to the returned payoff weighted by the probability of the
                     # oponent holding that hand.
                     #
-                    self.cfr_values[pid][card1, card2] = self.player_ranges[opp_pid] * utils[pid]
+                    # NOTE - see NOTE 3 above
+                    #
+                    self.values[pid, card1, card2] = self.player_ranges[opp_pid] * utils[pid]
             #
             # Reset the opponent's hand to its actual value
             #
@@ -252,19 +394,7 @@ class DecisionNode(CFRNode):
         #
         # Start with the abstract class's initialization function
         #
-        super().__init__(game)
-        
-        #
-        # Player ranges are the probability that each player reaches this state,
-        # under the current strategy profile, given a certain hand.
-        #
-        # For each player, this is expressed as a 52x52 upper triangular matrix,
-        #
-        # player_ranges[pid, card1, card2]
-        #     = prob. player pid reaches this state, under the current strategy profile,
-        #       given that they have the hand (card1, card2)
-        #
-        self.player_ranges = player_ranges
+        super().__init__(game, player_ranges)
         
         #
         # List of legal actions
@@ -333,25 +463,6 @@ class DecisionNode(CFRNode):
         #
         self.regrets  = np.zeros(len(self.actions), 52, 52)
 
-        #
-        # CFR value of holding each possible hand according to the current strategy profile
-        #
-        # This is represented as a 52x52 upper triangular matrix with the diagonal entries
-        # set to zero
-        #
-        # values[pid, card1, card2] 
-        #     = player pid's expected value given that they're in this state 
-        #
-        # All player's values are initialized to zero.
-        #
-        self.zero_values()
-
-    #
-    # Helper function - set values to zero.
-    #
-    def zero_values(self):
-        self.values = np.zeros((self.game.num_players, 52, 52), dtype=np.float64)
-
     #
     # Perform a CFR value update
     #
@@ -365,4 +476,7 @@ class DecisionNode(CFRNode):
         # For each child node...
         #
         for action in self.actions:
-
+            #
+            # Update the ranges for the acting player in the child
+            # states, according to the 
+            #
