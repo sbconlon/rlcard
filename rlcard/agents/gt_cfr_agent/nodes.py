@@ -74,6 +74,23 @@ class CFRNode(ABC):
     """
 
     #
+    # The root node of the game tree is always a decision node
+    # because the tree is constructed by a player in order to
+    # make a decision.
+    #
+    # root_pid stores the player id for the player making the
+    # decision at the root node
+    #
+    # This is used in the chance node because the player
+    # who's constructing this game tree should not reason
+    # about chance outcomes it knows can't happen.
+    #
+    # i.e. - the player knows it's impossible for a card in their
+    #        hand to be dealt on the board.
+    #
+    root_pid = None
+
+    #
     # NOTE - How to relate nodes to their corresponding game representations
     #
     #        Q: How much game information should be stored in each node?
@@ -102,13 +119,13 @@ class CFRNode(ABC):
         self.game = game
         
         #
-        # Player ranges are the probability that each player reaches this state,
-        # under the current strategy profile, given a certain hand.
+        # A player's range is the probability distribution over all possible hands,
+        # given the sequence of actions that player has taken up to this game state.
         #
         # For each player, this is expressed as a 52x52 upper triangular matrix,
         #
         # player_ranges[pid, card1, card2]
-        #     = prob. player pid reaches this state, under the current strategy profile,
+        #     = prob. player pid reaches this state, under their current strategy,
         #       given that they have the hand (card1, card2)
         #
         self.player_ranges = player_ranges
@@ -129,21 +146,36 @@ class CFRNode(ABC):
     #
     # Helper function - sets values to zero.
     #
-    def zero_values(self):
+    def zero_values(self) -> None:
         self.values = np.zeros((self.game.num_players, 52, 52), dtype=np.float64)
+
+    #
+    # Store the player id for the acting player at the root node
+    #
+    @classmethod
+    def set_root_pid(cls, pid : int) -> None:
+        cls.root_pid = pid
+    
+    #
+    # Get the player id for the acting player at the root node
+    #
+    @classmethod
+    def get_root_pid(cls) -> int:
+        assert(cls.root_pid)
+        return cls.root_pid
 
     #
     # Compute the CFR values for this node
     #  
     @abstractmethod
-    def update_values(self):
+    def update_values(self) -> None:
         pass
 
     #
     # Add a node to this node's subtree
     #
     @abstractmethod
-    def grow(self):
+    def grow(self) -> None:
         pass
 
 #
@@ -276,7 +308,6 @@ class TerminalNode(CFRNode):
         #
         # Initialize payoffs matrix to all zeros
         #
-        #
         self.payoffs = COO([self.game.num_players] + [52, 52]*self.game.num_players, np.float64)
         
         #
@@ -342,19 +373,28 @@ class TerminalNode(CFRNode):
         #
         for pid in range(self.game.num_players):
             #
-            # Using 'current player' to refer to the player whose values
-            # we are computing at this iteration
-            #
-            # If the current player's pid is 0, then the opponent's pid is 1
+            # If pid is 0, then the opponent's pid is 1
             # And, vice versa.
+            #
+            # NOTE - eventually, this should be rewritten for >2 player games
             #
             opp_pid = (pid + 1) % 2
             #
-            # Compute the expected value matrix
+            # Compute the expected value matrix for player pid
             #
             self.values[pid] = (self.payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
 
+    #
+    # Add a node to this node's subtree
+    #
+    def grow(self):
+        pass
 
+#
+# Decision node
+#
+# This node represents a decision made by a player in the game.
+#
 class DecisionNode(CFRNode):
 
     def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
@@ -393,7 +433,6 @@ class DecisionNode(CFRNode):
         #
         # Note - computing strategies for hands we don't have is neccessary for
         #        propagating the player's range down the game tree.
-        #
         #
         # Start with an array of random values
         #
@@ -468,6 +507,8 @@ class DecisionNode(CFRNode):
                 #
                 # range at child node = range at parent node
                 #
+                # NOTE - be careful to assign by value here and not by reference
+                #
                 child.player_ranges = np.copy(self.player_ranges)
                 child.player_ranges[pid] = self.strategy[action] * self.player_ranges[pid]
                 #
@@ -496,8 +537,188 @@ class DecisionNode(CFRNode):
             #
             # Else, 
             # 
-            # The child is not in the tree and we need to use the cfvn to estimate it. 
+            # The child is not in the tree,
+            # we need to use the cfvn to estimate it. 
             #
             else:
                 pass
-                
+
+        #
+        # Now that the values have changed for this node,
+        # the player's regrets and strategies need to be
+        # updated to reflect this change in values.
+        #
+        self.update_strategy()
+    
+    #
+    # Updates the player's regrets and strategies 
+    # according to the current values matrix.
+    #
+    def update_strategy(self):
+        pass
+    
+    #
+    # Add a node to this node's subtree
+    #
+    def grow(self):
+        pass
+
+
+#
+# Chance node
+#
+# This node represents chance events in the game
+#
+# For poker, the only chance events that occur are when public cards
+# are dealt on the board.
+#
+# Conceptually, chance nodes can be thought of as decision nodes where
+# a 'chance' player takes a stochastic action.
+#
+class ChanceNode(CFRNode):
+
+    #
+    # Chance nodes transition poker states from one stage to the next.
+    #
+    # For instance, if a player selects an action that completes the preflop stage of
+    # the game, then the chance node selects three cards to deal on the board, transitioning
+    # the game to the flop stage.
+    #
+    # Stage.PREFLOP -> 3 cards dealt -> Stage.FLOP -> 1 card dealt -> Stage.TURN -> 1 card dealt -> Stage.RIVER
+    #
+    # In the above example, ChanceNode(..., ..., Stage.PREFLOP) selects a 3 card outcome
+    # representing the 'chance' player selecting a random flop outcome.
+    #
+    # Note: stages can not be skipped, Stage.PREFLOP must transition to Stage.FLOP
+    #       (assuming the game doesn't terminate)
+    #
+
+    #
+    # Given the starting stage for the stage transition that this chance node
+    # represents, return the number of cards that need to be dealt to complete
+    # the transition
+    #
+    starting_stage_to_num_cards_dealt = {
+        Stage.PREFLOP : 3, # Deal 3 cards to transition PREFLOP -> FLOP
+        Stage.FLOP : 1,    # Deal 1 card to transition  FLOP -> TURN
+        Stage.TURN : 1     # Deal 1 card to transition  TURN -> RIVER
+    }
+
+    def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
+        #
+        # Start with the base initialization function
+        #
+        super().__init__(game, player_ranges)
+
+        #
+        # Using the 'chance' player decision node analogy,
+        #
+        # Outcomes of chance events are the same as a 'chance'
+        # player selecting an action that transitions deterministically
+        # transitions the current game state to a new game state.
+        #
+        # So, the 'outcomes' list here is directly analgous to the 
+        # 'actions' list in the decision node class.
+        #
+        # NOTE - would it be more or less confusing to just call the outcomes 'actions'?
+        #
+        # Outcomes is the set of possible card combinations that can be dealt for the
+        # given transition.
+        #
+        # Note 1: For single card outcomes (FLOP->TURN, TURN->RIVER), the branching factor (=47, =46) 
+        #         is not too bad. However, the 3 card outcome (PREFLOP->FLOP) branching factor is
+        #         = (50 choose 3) = 19600 !!!
+        #
+        # Note 2: We don't consider outcomes that include cards that are in the root player's
+        #         hand because she is the one constructing the tree and knows that these
+        #         outcomes are impossible.
+        #
+        root_player = CFRNode.get_root_pid()
+        valid_cards = [card for card in init_standard_deck() 
+                            if (
+                                (not card in self.game.public_cards) or
+                                (not card in self.game.players[root_player].hand)    
+                            )
+                    ]
+        self.outcomes = combinations(valid_cards,
+                                     ChanceNode.starting_stage_to_num_cards_dealt[self.game.stage])
+        
+        #
+        # Each outcome results in a unique child node
+        #
+        # Note: the game states for the child nodes are in the new game stage
+        #
+        # self.children[idx] = child node corresponding to the outcome at self.outcomes[idx]
+        #
+        self.children = {}
+
+    
+    #
+    # Update values for all the players at this chance node
+    #
+    # The value for a player at this chance node is the sum of the
+    # player's values at the child nodes, weighted by the probability
+    # of the outcome.
+    #
+    def update_values(self):
+        #
+        # Initialize values to zero
+        #
+        self.zero_values()
+        #
+        # Probability of a given outcome occuring.
+        #
+        # Note: All cards are randomly drawn from the deck, so all outcomes are equally likely.
+        #
+        prob = 1 / len(self.outcomes)
+        #
+        # For each outcome of this chance node
+        #
+        # NOTE - this loop is a prime candidate for parallelism
+        #
+        for idx in range(len(self.outcomes)):
+            #
+            # If the child node is in the game tree...
+            #
+            if idx in self.outcomes:
+                #
+                # Get the child node associated with the outcome idx
+                #
+                child = self.children[idx]
+                #
+                # Update the player's ranges in the child node
+                #
+                # Note: here the 'chance' player is the acting player
+                #       so the player's ranges at the child node are equal
+                #       to their ranges at the parent node.
+                #
+                child.player_ranges = np.copy(self.player_ranges)
+
+                #
+                # Update the child node's player values
+                #
+                child.update_values()
+
+                #
+                # Update the player's values at this node according to
+                # the child node's values.
+                #
+                self.values += prob * child.values
+
+                #
+                # Note: there is no strategy to update here because the
+                #       'chance' player is purely stochastic
+                #
+            
+            #
+            # Else, the child node is not in the game tree
+            # and we need the cfvn
+            #
+            else:
+                pass
+
+
+
+
+
+        

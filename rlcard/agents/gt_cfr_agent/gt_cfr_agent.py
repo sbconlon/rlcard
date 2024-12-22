@@ -3,7 +3,7 @@ import numpy as np
 import random
 
 from rlcard.envs.nolimitholdem import NolimitholdemEnv
-from rlcard.agents.gt_cfr_agent.nodes import DecisionNode
+from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode
 from rlcard.agents.gt_cfr_agent.utils import rand_value, initial_hand_values
 
 class GTCFRAgent():
@@ -70,11 +70,15 @@ class GTCFRAgent():
             #
             self.update_gadget_regrets()
 
-    # Add a leaf node to the game tree
+    #
+    # Add a node to the game tree
+    #
     def grow(self):
         pass
 
+    #
     # Growing Tree Counterfacutal Regret
+    #
     def gt_cfr(self):
         #
         # Each iteration computes the values of each node in the public state tree,
@@ -164,6 +168,10 @@ class GTCFRAgent():
         # Initialize the root node of the public game tree
         #
         self.root = DecisionNode(self.env.game, player_ranges, player_values)
+        #
+        # Save the player's id in the game tree
+        #
+        CFRNode.set_root_pid = self.root.game.game_pointer
         #
         # Initialize the root node's public state node children
         #

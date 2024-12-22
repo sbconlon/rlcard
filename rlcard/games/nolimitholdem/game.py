@@ -40,9 +40,8 @@ class NolimitholdemGame(Game):
         self.dealer_id = None
 
         #
-        # Rig dealt cards
+        # Deterministically deal cards
         #
-        
         #
         # Set to insure the same card isn't dealt twice
         #
