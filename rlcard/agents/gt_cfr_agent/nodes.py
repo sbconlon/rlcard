@@ -558,10 +558,93 @@ class DecisionNode(CFRNode):
         pass
     
     #
+    # Add the child node associated with the given action
+    #
+    def add_child(self, action : int):
+        #
+        # Validate the given action
+        #
+        assert(action in range(len(self.actions)))
+        assert(self.children[action] is None)
+        
+        #
+        # Create a new game object for the new node
+        # 
+        # Initialize the object as a copy of the parent's game state
+        #
+        new_game = copy.deepcopy(self.game)
+        
+        #
+        # Apply the given action to the (copy of) the parent's game state
+        # to get the child's game state
+        #
+        action_str = new_game.get_legal_actions()[action]
+        new_game.step(action_str)
+        
+        #
+        # Build the child node
+        #
+        child_node = None
+        
+        #
+        # Compute the child's player ranges
+        #
+        # NOTE - should this be made its own function, since the same
+        #        operation is done in update_values()
+        #
+        pid = self.game.game_pointer
+        child_ranges = np.copy(self.player_ranges)
+        child_ranges[pid] = self.strategy[action] * self.player_ranges[pid]
+
+        #
+        # Case 1 - Child is a Chance Node 
+        #
+        # Check if the action caused a stage change
+        #
+        # NOTE: I'm not sure what the "END_HIDDEN" stage means?
+        #
+        if (self.game.stage != new_game.stage and 
+            not new_game.stage in (Stage.END_HIDDEN, Stage.SHOWDOWN)):
+            #
+            # Note: the chance node initializer expects the given game state
+            #       to be the game state before cards are dealt
+            #
+            child_node = ChanceNode(copy.deepcopy(self.game), child_ranges)
+        
+        #
+        # Case 2 - Child is a Terminal Node
+        #
+        elif new_game.stage == Stage.SHOWDOWN:
+            child_node = TerminalNode(new_game, child_ranges)
+        
+        #
+        # Case 3 - Child is a Decision Node
+        #
+        # NOTE - doing the stage check to exlude 'END_HIDDEN'
+        #
+        elif new_game.stage in (Stage.PREFLOP, Stage.FLOP, Stage.TURN, Stage.RIVER):
+            child_node = DecisionNode(new_game, child_ranges)
+        
+        #
+        # Case 4 - Unknown child
+        #
+        else:
+            print('DecisionNode->add_child(): UNRECOGNIZED GAME STATE')
+            print(new_game)
+            assert(False)
+        
+        #
+        # Add the child to the parent node's child list
+        #
+        self.children[action] = child_node
+
+    #
     # Add a node to this node's subtree
     #
     def grow(self):
         pass
+
+
 
 
 #

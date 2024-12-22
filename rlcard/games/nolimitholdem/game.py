@@ -185,7 +185,7 @@ class NolimitholdemGame(Game):
         self.players[s].bet(chips=self.small_blind)
 
         # If the stage is PREFLOP, then
-        # the player next to the big blind plays the first
+        # the player next to the big blind plays first
         if self.stage == Stage.PREFLOP:
             self.game_pointer = (b + 1) % self.num_players
         # Otherwise, the small blind starts
