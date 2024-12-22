@@ -23,6 +23,7 @@ from sparse import COO
 
 # Internal imports
 from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
+from rlcard.games.nolimitholdem.round import Action
 from rlcard.utils.utils import init_standard_deck
 
 #
@@ -560,12 +561,12 @@ class DecisionNode(CFRNode):
     #
     # Add the child node associated with the given action
     #
-    def add_child(self, action : int):
+    def add_child(self, action : int) -> None:
         #
         # Validate the given action
         #
-        assert(action in range(len(self.actions)))
-        assert(self.children[action] is None)
+        assert 0 <= action < len(self.actions), "Invalid action index"
+        assert self.children[action] is None, "Child already exists"
         
         #
         # Create a new game object for the new node
@@ -629,9 +630,7 @@ class DecisionNode(CFRNode):
         # Case 4 - Unknown child
         #
         else:
-            print('DecisionNode->add_child(): UNRECOGNIZED GAME STATE')
-            print(new_game)
-            assert(False)
+            raise ValueError(f"Unrecognized game state in add_child(): {new_game}")
         
         #
         # Add the child to the parent node's child list
@@ -641,11 +640,8 @@ class DecisionNode(CFRNode):
     #
     # Add a node to this node's subtree
     #
-    def grow(self):
+    def grow(self, ):
         pass
-
-
-
 
 #
 # Chance node
@@ -800,8 +796,52 @@ class ChanceNode(CFRNode):
             else:
                 pass
 
+    #
+    # Add the child node associated with the given outcome index
+    #
+    def add_child(self, idx : int) -> None:
+        #
+        # Validate the given outcome index
+        #
+        assert 0 <= idx < len(self.outcomes), "Invalid outcome index"
+        assert not idx in self.children, "Child already exists"
 
+        #
+        # Create a new game object for the new node
+        # 
+        # Initialize the object as a copy of the parent's game state
+        #
+        new_game = copy.deepcopy(self.game)
 
+        #
+        # Perform the check/call action in the new game to cause the transition
+        #
+        # Only two actions cause the game to undergo a stage transition,
+        # check and call.
+        #
+        # In RLCard, check and call is fused into a single action, Action.CHECK_CALL
+        #
+        # NOTE - For generality, should we just store the action that causes the transition
+        #        at initialization time so that we don't have to assume Action.CHECK_CALL
+        #        was the action that caused the stage transition?
+        #
+        new_game.step(Action.CHECK_CALL)
 
+        #
+        # During the step, the RLCard game will select a randomized outcome.
+        #
+        # We need to overwrite this outcome to the one we want.
+        #
+        outcome = self.outcomes[idx]
+        assert len(new_game.public_cards) >= len(outcome), "Public cards is a different length than expected"
+        new_game.public_cards[-1 * len(outcome):] = outcome
 
-        
+        #
+        # Save the new child node in the parent's child list.
+        #
+        # Note 1 - All new poker stages start with a player decision.
+        #
+        # Note 2 - None of the player's made a decision at this node so their ranges
+        #          at the child node remain unchanged. 
+        #
+        self.children[idx] = DecisionNode(new_game, np.copy(self.player_ranges))
