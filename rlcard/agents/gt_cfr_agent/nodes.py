@@ -47,7 +47,7 @@ from rlcard.utils.utils import init_standard_deck
 #
 #       - update_values() - using CFR, compute the players' regret values and the acting player's policy.
 #
-#       - grow() - add a child node to this node's subtree according to the Growing-Tree CFR algo
+#       - grow_tree() - add a child node to this node's subtree according to the Growing-Tree CFR algo
 #
 #
 class CFRNode(ABC):
@@ -176,7 +176,7 @@ class CFRNode(ABC):
     # Add a node to this node's subtree
     #
     @abstractmethod
-    def grow(self) -> None:
+    def grow_tree(self, hands : list[list[int]]) -> bool:
         pass
 
 #
@@ -387,10 +387,10 @@ class TerminalNode(CFRNode):
             self.values[pid] = (self.payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
 
     #
-    # Add a node to this node's subtree
+    # Just return false because we can't add a child to a terminal node
     #
-    def grow(self):
-        pass
+    def grow_tree(self, hands : list[list[int]]) -> bool:
+        return False
 
 #
 # Decision node
@@ -516,13 +516,13 @@ class DecisionNode(CFRNode):
         self.strategy = regret_pos / regret_sum
 
     #
-    # Perform a CFR value update
+    # Perform a CFR value and strategy update
     #
     def update_values(self):
         #
         # Player id for the acting player
         #
-        # Note - game_pointer holds the player id of the player making the decision
+        # Note: game_pointer holds the player id of the player making the decision
         #
         pid = self.game.game_pointer
         #
@@ -588,7 +588,6 @@ class DecisionNode(CFRNode):
             #
             else:
                 pass
-
         #
         # Now that the values have changed for this node,
         # the player's regrets and strategies need to be
@@ -678,8 +677,29 @@ class DecisionNode(CFRNode):
     #
     # Add a node to this node's subtree
     #
-    def grow(self, ):
-        pass
+    # Return true if successful, false otherwise
+    #
+    def grow_tree(self, hands : list[list[int]]) -> bool:
+        #
+        # Get the acting player's strategy for the provided hand
+        #
+        pid = self.game.game_pointer
+        strat = self.strategy[:, hands[pid][0], hands[pid][1]] # np.array, (num_actions,)
+        #
+        # Sample an action using the acting player's strategy
+        #
+        action = np.random.choice(len(strat), p=strat)
+        #
+        # If the child associated with that action isn't in the game tree,
+        # then add it. And return.
+        #
+        if not self.children[action]:
+            self.add_child(action)
+            return True
+        #
+        # Otherwise, the child node is in the tree and we continue traversing.
+        #
+        return self.children[action].grow_tree(hands)
 
 #
 # Chance node
@@ -769,7 +789,6 @@ class ChanceNode(CFRNode):
         #
         self.children = {}
 
-    
     #
     # Update values for all the players at this chance node
     #
@@ -883,3 +902,44 @@ class ChanceNode(CFRNode):
         #          at the child node remain unchanged. 
         #
         self.children[idx] = DecisionNode(new_game, np.copy(self.player_ranges))
+    
+    #
+    # Add a child node to this subtree
+    #
+    def grow_tree(self, hands : list[list[int]]) -> bool:
+        #
+        # Randomly sample an outcome from the outcomes list
+        #
+        # If the sampled outcome contains a card in the player's hands,
+        # then sample another outcome.
+        #
+        # Repeat until a valid outcome is found.
+        #
+        # Note 1: This saves time versus scanning the entire outcomes list.
+        #
+        #         We have an approx. 80% chance of sampling a valid action.
+        #
+        #         The expected number of retries follows the geometric distribution:
+        #             E[retries] = 1/p = 1/.8 = 1.25 retries
+        # 
+        #         This is significantly faster in expectation than scanning the entire
+        #         outcomes list.
+        #
+        # Note 2: We are always guaranteed that a valid outcome exists.
+        #
+        used_cards = {card for hand in hands for card in hand}
+        while True:
+            idx = np.random.choice(len(self.outcomes))
+            if all(card.to_int() not in used_cards for card in self.outcomes[idx]):
+                break
+        #
+        # If the child node associated with this outcome is not in the game tree,
+        # then add it.
+        #
+        if idx not in self.children:
+            self.add_child(idx)
+            return True
+        #
+        # Else, the child is not in the game tree and we can recurse.
+        #
+        return self.children[idx].grow_tree(hands)
