@@ -309,7 +309,8 @@ class TerminalNode(CFRNode):
         #
         # Initialize payoffs matrix to all zeros
         #
-        self.payoffs = COO([self.game.num_players] + [52, 52]*self.game.num_players, np.float64)
+        shape = [self.game.num_players] + [52, 52]*self.game.num_players
+        self.payoffs = COO(shape, np.float64)
         
         #
         # Get the set of possible cards 
