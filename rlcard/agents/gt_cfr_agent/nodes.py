@@ -205,7 +205,7 @@ class TerminalNode(CFRNode):
     #
     #     I think the easiest way to handle this (and how I think
     #     rlcard handles it inside the nolimitholdem game class) is
-    #     to treat a (1) as a special case of (2) where the last
+    #     to treat (1) as a special case of (2) where the last
     #     remaining player goes to a single player showdown.
     #     (trivially, this just means that player recieves the entire pot). 
     #
@@ -471,6 +471,50 @@ class DecisionNode(CFRNode):
         self.regrets  = np.zeros(len(self.actions), 52, 52)
 
     #
+    # Updates the player's regrets and strategies 
+    # according to the current values matrix.
+    #
+    def update_strategy(self) -> None:
+        #
+        # Get the id for the acting player
+        #
+        pid = self.game.game_pointer
+        #
+        # Use player values to the update the acting player's regrets
+        #
+        # Note 1: The regret for an action is defined as the value difference
+        #         between always playing that action and playing our current strategy
+        #
+        # Note 2: Large positive regret = a good action, way better than our current strategy
+        #         Large negative regret = a bad  action, way worse  than our current strategy
+        #
+        # Note 3: KEY IDEA - we want to shift our strategy toward actions that perform better
+        #                    than our current strategy.
+        #
+        for action, child in enumerate(self.children):
+            #
+            # If the child is in the game tree
+            #
+            if child:
+                self.regrets[action] += child.values[pid] - self.values[pid]
+            #
+            # Else, use the cfvn value
+            #
+            # NOTE - this value should be cached somewhere since we already had
+            #        to compute this when we did the value update
+            #
+            else:
+                pass
+        #
+        # Update the acting player's strategy according to the new regrets
+        #
+        # Using the regret matching formula
+        #
+        regret_pos = np.maximum(self.regrets, 0)
+        regret_sum = np.sum(regret_pos, axis=0, keepdims=True) # sum along actions axis, (1, 52, 52) array
+        self.strategy = regret_pos / regret_sum
+
+    #
     # Perform a CFR value update
     #
     def update_values(self):
@@ -550,14 +594,7 @@ class DecisionNode(CFRNode):
         # updated to reflect this change in values.
         #
         self.update_strategy()
-    
-    #
-    # Updates the player's regrets and strategies 
-    # according to the current values matrix.
-    #
-    def update_strategy(self):
-        pass
-    
+        
     #
     # Add the child node associated with the given action
     #
