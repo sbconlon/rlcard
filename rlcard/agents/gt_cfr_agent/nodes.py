@@ -22,6 +22,7 @@ import numpy as np
 from sparse import COO
 
 # Internal imports
+from rlcard.agents.gt_cfr_agent.cvfn import CounterfactualValueNetwork
 from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
 from rlcard.games.nolimitholdem.round import Action
 from rlcard.utils.utils import init_standard_deck
@@ -51,28 +52,11 @@ from rlcard.utils.utils import init_standard_deck
 #
 #
 class CFRNode(ABC):
-
-    """
     #
     # Use global variables that are shared across nodes
     # to store private information that does not change across
     # game states. (ex. player's hands)
     #
-    
-    #
-    # NOTE - this is potentially not thread safe when switching to multiparallelism
-    #
-    
-    #
-    # Player hands
-    #
-    # [(player1 card1, player1 card2), (player2 card1, player2 card2), ...]
-    #
-    # Neccessary for determining the winner of a showdown
-    #
-    for now, this is replaced by self.game.players[id].hand
-    hands = None
-    """
 
     #
     # The root node of the game tree is always a decision node
@@ -92,6 +76,14 @@ class CFRNode(ABC):
     root_pid = None
 
     #
+    # CounterfactualValueNetowrk - this is set during tree initialization
+    #                              and shared across all nodes in the tree.
+    #
+    # NOTE - would it make sense to use a different cfvn for each stage of the game?
+    #
+    cvfn = None
+
+    #
     # NOTE - How to relate nodes to their corresponding game representations
     #
     #        Q: How much game information should be stored in each node?
@@ -101,7 +93,7 @@ class CFRNode(ABC):
     #        A2: Future solution  - store only critical information, then use this 
     #                               info to create a NolimitHoldem game instance when we need to
     #                             
-    #                               Examples. 
+    #                               Examples.
     #                                   - to determine payouts
     #                                   - to use knowledge of the game dynamics
     #                                     when adding a new node to the tree
@@ -112,6 +104,22 @@ class CFRNode(ABC):
     #               information.
     #
     def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
+        #
+        # If a node is active -
+        #     then the game state is considered to be a full member of the game tree.
+        #
+        # If a non is inactive -
+        #     then the game state is considered a pseudo-node of the game tree,
+        #     these are placeholder leaf nodes that are used to store values for the
+        #     game state, but have not been selected by the grow_tree() algorithm.
+        #
+        # All nodes are initialized as inactive.
+        #
+        # Note: This is a design decision to ensure that all nodes become active
+        # through their own activation calls.
+        #
+        self.is_active = False
+
         #
         # Game object associated with this node.
         #
@@ -143,20 +151,35 @@ class CFRNode(ABC):
         # All player's values are initialized to zero.
         #
         self.zero_values()
-    
+
     #
-    # Helper function - sets values to zero.
+    # --> Helper functions
+    # 
+    # Sets values to zero.
     #
     def zero_values(self) -> None:
         self.values = np.zeros((self.game.num_players, 52, 52), dtype=np.float64)
 
     #
-    # Store the player id for the acting player at the root node
+    # --> Class member setters
+    #
+    # Set the game tree's counterfactual value network
+    #
+    @classmethod
+    def set_cvfn(cls, cvfn : CounterfactualValueNetwork) -> None:
+        cls.cvfn = cvfn
+    #
+    # Get the game tree's counterfactual value network
+    #
+    @classmethod
+    def get_cvfn(cls) -> CounterfactualValueNetwork:
+        return cls.cvfn
+    #
+    # Set the player id for the acting player at the root node
     #
     @classmethod
     def set_root_pid(cls, pid : int) -> None:
         cls.root_pid = pid
-    
     #
     # Get the player id for the acting player at the root node
     #
@@ -166,14 +189,17 @@ class CFRNode(ABC):
         return cls.root_pid
 
     #
-    # Compute the CFR values for this node
-    #  
+    # --> Abstract base class methods
+    #
+    # Compute the CFR values for this node,
+    # and return a list of queries made to the cvfn in the node's subtree
+    #
     @abstractmethod
     def update_values(self) -> None:
         pass
-
     #
-    # Add a node to this node's subtree
+    # Add a node to this node's subtree,
+    # return True if successful, False otherwise
     #
     @abstractmethod
     def grow_tree(self, hands : list[list[int]]) -> bool:
@@ -219,13 +245,19 @@ class TerminalNode(CFRNode):
         #
         # Use the inherited initialization function
         #
-        # All other values are set to defaults
+        # Note: all terminal nodes are activated by default
+        #
+        # NOTE - for now, I don't see a reason why terminal nodes
+        #        should be considered 'deactivated', but this might
+        #        change depending on the overhead for computing
+        #        payoff matrices.
         #
         super.__init__(self, game, player_ranges)
+        self.is_active = True
         #
         # Poker games are terminated with showdowns
         #
-        assert(self.game.stage == Stage.SHOWDOWN) # I think this is correct?
+        assert(self.game.stage == Stage.SHOWDOWN) # NOTE - I think this is correct?
         #
         # Compute the payoff matrix for this node.
         #
@@ -233,7 +265,7 @@ class TerminalNode(CFRNode):
         #
         self.cache_payoffs()
         #
-        # Value over hands, for each player
+        # Value of each hand, for each player
         #
         # values[pid, card1, card2]
         #
@@ -302,7 +334,9 @@ class TerminalNode(CFRNode):
         #
         # Remember the actual hands for each player
         #
-        # NOTE - do we care about storing their real hands in this node?
+        # NOTE 1 - do we care about storing their real hands in this node?
+        #          for the time being, we will insist that each node stores an accurate,
+        #          full game state representation, even if this is not neccessary for this node.
         #
         real_hands = [self.game.players[pid].hand for pid in range(self.game.num_players)]
 
@@ -368,8 +402,9 @@ class TerminalNode(CFRNode):
     #
     # values[pid, card1, card2] = sum(payoff[pid, card1, card2, :, :] * range[opp, :, :])
     #
+    # Returns an empty list because no querries to the cfvn were needed.
     #
-    def update_values(self):
+    def update_values(self) -> list:
         #
         # For each player...
         #
@@ -385,12 +420,23 @@ class TerminalNode(CFRNode):
             # Compute the expected value matrix for player pid
             #
             self.values[pid] = (self.payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
+        #
+        # No querries were made to the cfvn
+        #
+        return []
 
     #
     # Just return false because we can't add a child to a terminal node
     #
     def grow_tree(self, hands : list[list[int]]) -> bool:
         return False
+    
+    #
+    # Terminal nodes are active by default,
+    # so nothing to do here.
+    #
+    def activate(self) -> None:
+        pass
 
 #
 # Decision node
@@ -399,9 +445,14 @@ class TerminalNode(CFRNode):
 #
 class DecisionNode(CFRNode):
 
+    #
+    # Initialize a new, non-active, decision node
+    #
     def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
         #
         # Start with the abstract class's initialization function
+        #
+        # Note: this initialized the node as non-active
         #
         super().__init__(game, player_ranges)
         
@@ -477,6 +528,10 @@ class DecisionNode(CFRNode):
     #
     def update_strategy(self) -> None:
         #
+        # Verify the node is active
+        #
+        assert self.is_active, "Only active nodes in the game tree perform strategy updates"
+        #
         # Get the id for the acting player
         #
         pid = self.game.game_pointer
@@ -494,18 +549,13 @@ class DecisionNode(CFRNode):
         #
         for action, child in enumerate(self.children):
             #
-            # If the child is in the game tree
+            # Children of active nodes should be initialized already
             #
-            if child:
-                self.regrets[action] += child.values[pid] - self.values[pid]
+            assert child is not None, "Active node should not have a null child"
             #
-            # Else, use the cfvn value
+            # Perform the regret update for this node
             #
-            # NOTE - this value should be cached somewhere since we already had
-            #        to compute this when we did the value update
-            #
-            else:
-                pass
+            self.regrets[action] += child.values[pid] - self.values[pid]
         #
         # Update the acting player's strategy according to the new regrets
         #
@@ -513,12 +563,35 @@ class DecisionNode(CFRNode):
         #
         regret_pos = np.maximum(self.regrets, 0)
         regret_sum = np.sum(regret_pos, axis=0, keepdims=True) # sum along actions axis, (1, 52, 52) array
+        regret_sum[regret_sum == 0] = 1 # avoid dividing by zero
         self.strategy = regret_pos / regret_sum
 
     #
     # Perform a CFR value and strategy update
     #
-    def update_values(self):
+    # Returns a list of queries made to the cvfn in the node's subtree
+    #
+    def update_values(self) -> list[tuple[np.ndarry]]:
+        #
+        # If this node is not active, 
+        # then estimate its values using the cfvn. 
+        #
+        if not self.is_active:
+            #
+            # Convert the nodes information into an input vector for the cvfn
+            #
+            input = DecisionNode.get_cvfn().to_vect(self.game, self.player_ranges, False)
+            #
+            # Query the network
+            #
+            self.values, self.strategy = DecisionNode.get_cvfn().query(input)
+            #
+            # Package the input/output of the network into a query tuple
+            #
+            return [(input, np.copy(self.values), np.copy(self.strategy))]
+        #
+        # Else, the node is active in the game tree and we
+        # need to perform a full value update with recursion.
         #
         # Player id for the acting player
         #
@@ -530,100 +603,104 @@ class DecisionNode(CFRNode):
         #
         self.zero_values()
         #
+        # List to store cvfn queries made by the node's children
+        #
+        querries = []
+        #
         # For each child node...
         #
         for action, child in enumerate(self.children):
             #
-            # If the child node is in the tree...
+            # Verify the children are not null
             #
-            if child:
-                #
-                # Update the ranges for the acting player in the child
-                # states, according to the acting player's strategy.
-                #
-                # For the acting player,
-                # 
-                # prob. of reaching child node 
-                #     = prob. of reaching parent node * prob. of selecting action A
-                # 
-                # where action A transitions the game from the parent to the child node.
-                #
-                # 
-                # For the non-acting player,
-                #
-                # range at child node = range at parent node
-                #
-                # NOTE - be careful to assign by value here and not by reference
-                #
-                child.player_ranges = np.copy(self.player_ranges)
-                child.player_ranges[pid] = self.strategy[action] * self.player_ranges[pid]
-                #
-                # Compute the value of the child node
-                #
-                child.update_values()
-                #
-                # Use the child's values to update the parent's values
-                #
-                # For the acting player,
-                #
-                # the value contribution associated with selecting this action is
-                # equal to the value of the child state weighted by the acting player's
-                # probability of selecting the action
-                #
-                self.values[pid] += self.strategy[action] * child.values[pid]
-                #
-                # For the non-acting players,
-                #
-                # the player's value in the parent node is simply a sum of the 
-                # player's values in the child nodes.
-                #
-                for opp_pid in range(self.game.num_players):
-                    if opp_pid != pid:
-                        self.values[opp_pid] += child.values[opp_pid]
+            assert child is not None, "Active nodes cant have null children"
             #
-            # Else, 
+            # Update the ranges for the players in the child
+            # state, according to the acting player's strategy.
+            #
+            #
+            # For the acting player,
             # 
-            # The child is not in the tree,
-            # we need to use the cfvn to estimate it. 
+            # prob. of reaching child node 
+            #     = prob. of reaching parent node * prob. of selecting action A
+            # 
+            # where action A transitions the game from the parent to the child node.
             #
-            else:
-                pass
+            # 
+            # For the non-acting player,
+            #
+            # range at child node = range at parent node
+            #
+            #
+            # NOTE - be careful to assign by value here and not by reference
+            #
+            child.player_ranges = np.copy(self.player_ranges)
+            child.player_ranges[pid] = self.strategy[action] * self.player_ranges[pid]
+            #
+            # Compute the value of the child node
+            #
+            querries.append(child.update_values())
+            #
+            # Use the child's values to update the parent's values
+            #
+            # For the acting player,
+            #
+            # the value contribution associated with selecting this action is
+            # equal to the value of the child state weighted by the acting player's
+            # probability of selecting the action
+            #
+            self.values[pid] += self.strategy[action] * child.values[pid]
+            #
+            # For the non-acting players,
+            #
+            # the player's value in the parent node is simply a sum of the 
+            # player's values in the child nodes.
+            #
+            for opp_pid in range(self.game.num_players):
+                if opp_pid != pid:
+                    self.values[opp_pid] += child.values[opp_pid]
         #
         # Now that the values have changed for this node,
         # the player's regrets and strategies need to be
         # updated to reflect this change in values.
         #
         self.update_strategy()
+        #
+        # Return the querries made in this subtree
+        # during the value update
+        #
+        return querries
         
     #
-    # Add the child node associated with the given action
+    # Add the child node associated with the given action.
     #
-    def add_child(self, action : int) -> None:
+    # NOTE !!! - Are we sure the action needs to be an integer?
+    # action - int, action that leads to the child node to be added.
+    #
+    # Note: Terminal nodes are always actived.
+    #
+    def add_child(self, action : int) -> None: #NOTE
         #
         # Validate the given action
         #
         assert 0 <= action < len(self.actions), "Invalid action index"
         assert self.children[action] is None, "Child already exists"
-        
         #
         # Create a new game object for the new node
         # 
         # Initialize the object as a copy of the parent's game state
         #
         new_game = copy.deepcopy(self.game)
-        
         #
         # Apply the given action to the (copy of) the parent's game state
         # to get the child's game state
         #
         action_str = new_game.get_legal_actions()[action]
         new_game.step(action_str)
-        
         #
         # Build the child node
         #
         child_node = None
-        
         #
         # Compute the child's player ranges
         #
@@ -633,7 +710,6 @@ class DecisionNode(CFRNode):
         pid = self.game.game_pointer
         child_ranges = np.copy(self.player_ranges)
         child_ranges[pid] = self.strategy[action] * self.player_ranges[pid]
-
         #
         # Case 1 - Child is a Chance Node 
         #
@@ -648,13 +724,11 @@ class DecisionNode(CFRNode):
             #       to be the game state before cards are dealt
             #
             child_node = ChanceNode(copy.deepcopy(self.game), child_ranges)
-        
         #
         # Case 2 - Child is a Terminal Node
         #
         elif new_game.stage == Stage.SHOWDOWN:
             child_node = TerminalNode(new_game, child_ranges)
-        
         #
         # Case 3 - Child is a Decision Node
         #
@@ -662,17 +736,41 @@ class DecisionNode(CFRNode):
         #
         elif new_game.stage in (Stage.PREFLOP, Stage.FLOP, Stage.TURN, Stage.RIVER):
             child_node = DecisionNode(new_game, child_ranges)
-        
         #
         # Case 4 - Unknown child
         #
         else:
             raise ValueError(f"Unrecognized game state in add_child(): {new_game}")
-        
         #
         # Add the child to the parent node's child list
         #
         self.children[action] = child_node
+    
+    #
+    # Activate the node
+    #
+    # Only leaf nodes can be activated, 
+    # children can only be added to active nodes.
+    # 
+    # When activating a node, add its children as non-active nodes.
+    # This alows for more efficient value updates on the active node.
+    #
+    def activate(self) -> None:
+        #
+        # Validate that this node satisfies the conditions
+        # of a non-active node before activating it.
+        #
+        assert not self.is_active, "This node is already active"
+        assert all(child is None for child in self.children), "Non-active nodes can't have children"
+        #
+        # Set the activation flag to true
+        #
+        self.is_active = True
+        #
+        # Add the child nodes, as non-active nodes
+        #
+        for action in self.actions:
+            self.add_child(action)
 
     #
     # Add a node to this node's subtree
@@ -681,23 +779,29 @@ class DecisionNode(CFRNode):
     #
     def grow_tree(self, hands : list[list[int]]) -> bool:
         #
-        # Get the acting player's strategy for the provided hand
+        # If this node is not active, then activate it.
+        #
+        if not self.is_active:
+            self.activate()
+            return True
+        #
+        # Else, we need to continue sampling a trajectory through the game tree.
+        #
+        # Get the acting player's strategy for the provided hand.
         #
         pid = self.game.game_pointer
         strat = self.strategy[:, hands[pid][0], hands[pid][1]] # np.array, (num_actions,)
         #
         # Sample an action using the acting player's strategy
         #
+        strat = strat / np.sum(strat) # renormalize to avoid floating point error weirdness
         action = np.random.choice(len(strat), p=strat)
         #
-        # If the child associated with that action isn't in the game tree,
-        # then add it. And return.
+        # Check that this child is not None
         #
-        if not self.children[action]:
-            self.add_child(action)
-            return True
+        assert self.children[action] is not None, "Active nodes cant have null children"
         #
-        # Otherwise, the child node is in the tree and we continue traversing.
+        # Recurse to the child
         #
         return self.children[action].grow_tree(hands)
 
@@ -785,9 +889,7 @@ class ChanceNode(CFRNode):
         #
         # Note: the game states for the child nodes are in the new game stage
         #
-        # self.children[idx] = child node corresponding to the outcome at self.outcomes[idx]
-        #
-        self.children = {}
+        self.children = None
 
     #
     # Update values for all the players at this chance node
@@ -796,7 +898,30 @@ class ChanceNode(CFRNode):
     # player's values at the child nodes, weighted by the probability
     # of the outcome.
     #
-    def update_values(self):
+    # Returns a list of queries made to the cvfn in the node's subtree
+    #
+    def update_values(self) -> list[tuple[np.ndarray]]:
+        #
+        # If this node is not active, 
+        # then estimate its values using the cfvn. 
+        #
+        if not self.is_active:
+            #
+            # All inactive nodes should be childless
+            #
+            assert not self.children, "Inactive nodes should not have children"
+            #
+            # Convert the nodes information into an input vector for the cvfn
+            #
+            input = DecisionNode.get_cvfn().to_vect(self.game, self.player_ranges, True)
+            #
+            # Query the network
+            #
+            self.values, self.strategy = DecisionNode.get_cvfn().query(input)
+            #
+            # Package the input/output of the network into a query tuple
+            #
+            return [(input, np.copy(self.values), np.copy(self.strategy))]
         #
         # Initialize values to zero
         #
@@ -808,50 +933,37 @@ class ChanceNode(CFRNode):
         #
         prob = 1 / len(self.outcomes)
         #
+        # List to store querries to the cvfn made in the subtree
+        #
+        querries = []
+        #
         # For each outcome of this chance node
         #
         # NOTE - this loop is a prime candidate for parallelism
         #
-        for idx in range(len(self.outcomes)):
+        for child in self.children:
             #
-            # If the child node is in the game tree...
+            # Update the player's ranges in the child node
             #
-            if idx in self.outcomes:
-                #
-                # Get the child node associated with the outcome idx
-                #
-                child = self.children[idx]
-                #
-                # Update the player's ranges in the child node
-                #
-                # Note: here the 'chance' player is the acting player
-                #       so the player's ranges at the child node are equal
-                #       to their ranges at the parent node.
-                #
-                child.player_ranges = np.copy(self.player_ranges)
-
-                #
-                # Update the child node's player values
-                #
-                child.update_values()
-
-                #
-                # Update the player's values at this node according to
-                # the child node's values.
-                #
-                self.values += prob * child.values
-
-                #
-                # Note: there is no strategy to update here because the
-                #       'chance' player is purely stochastic
-                #
-            
+            # Note: here the 'chance' player is the acting player
+            #       so the player's ranges at the child node are equal
+            #       to their ranges at the parent node.
             #
-            # Else, the child node is not in the game tree
-            # and we need the cfvn
+            child.player_ranges = np.copy(self.player_ranges)
             #
-            else:
-                pass
+            # Update the child node's player values
+            #
+            querries.append(child.update_values())
+            #
+            # Update the player's values at this node according to
+            # the child node's values.
+            #
+            self.values += prob * child.values
+            #
+            # Note: there is no strategy to update here because the
+            #       'chance' player is purely stochastic
+            #
+        return querries
 
     #
     # Add the child node associated with the given outcome index
@@ -860,8 +972,10 @@ class ChanceNode(CFRNode):
         #
         # Validate the given outcome index
         #
+        assert self.is_active, "Only active nodes can have children"
         assert 0 <= idx < len(self.outcomes), "Invalid outcome index"
-        assert not idx in self.children, "Child already exists"
+        assert self.children is not None, "Child list for an active node is none"
+        assert self.children[idx] is None, "Child already exists"
 
         #
         # Create a new game object for the new node
@@ -889,9 +1003,20 @@ class ChanceNode(CFRNode):
         #
         # We need to overwrite this outcome to the one we want.
         #
-        outcome = self.outcomes[idx]
-        assert len(new_game.public_cards) >= len(outcome), "Public cards is a different length than expected"
-        new_game.public_cards[-1 * len(outcome):] = outcome
+        # NOTE - is there a better way to do this?
+        #
+        desired_outcome = self.outcomes[idx]
+        assert (len(new_game.public_cards) >= len(desired_outcome), 
+                "Public cards is a different length than expected")
+        random_outcome = new_game.public_cards[-1 * len(desired_outcome):] 
+        new_game.public_cards[-1 * len(desired_outcome):] = desired_outcome
+        
+        #
+        # Return the cards that were dealt on the random outcome back to the deck.
+        #
+        assert (all(card not in self.game.dealer.deck for card in random_outcome), 
+                "Cards that were dealt are still in the deck")
+        self.game.dealer.deck.append(random_outcome)
 
         #
         # Save the new child node in the parent's child list.
@@ -904,9 +1029,41 @@ class ChanceNode(CFRNode):
         self.children[idx] = DecisionNode(new_game, np.copy(self.player_ranges))
     
     #
+    # Make the node an active node in the game tree
+    #
+    def activate(self) -> None:
+        #
+        # Verify that the node is well-formatted
+        #
+        assert not self.is_active, "Cant activate an already active node"
+        assert self.children is None, "Non-active nodes should not have children"
+        #
+        # Set the activation flag
+        #
+        self.is_active = True
+        #
+        # Add the children as non-active nodes
+        #
+        # Note: this is a costly operation.
+        #
+        # NOTE - refactor and parallelize this
+        #
+        self.children = [None] * len(self.outcomes)
+        for idx in range(len(self.outcomes)):
+            self.add_child(idx)
+    
+    #
     # Add a child node to this subtree
     #
     def grow_tree(self, hands : list[list[int]]) -> bool:
+        #
+        # If this node isn't active, then activate it.
+        #
+        if not self.is_active:
+            self.activate()
+            return True
+        #
+        # Else, we need to continue sampling a trajectory.
         #
         # Randomly sample an outcome from the outcomes list
         #

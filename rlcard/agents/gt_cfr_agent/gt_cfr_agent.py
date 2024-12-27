@@ -349,22 +349,23 @@ class GTCFRAgent():
         #
         # Initialize the root node of the public game tree
         #
-        self.root = DecisionNode(copy.deepcopy(self.env.game), player_ranges, player_values)
+        self.root = DecisionNode(True, copy.deepcopy(self.env.game), player_ranges, player_values)
         #
         # Save the player's id in the game tree
         #
         CFRNode.set_root_pid = self.root.game.game_pointer
         #
-        # Initialize the root node's public state node children
+        # Activate the root node and its children
         #
-        for a in self.root.actions:
-            self.root.add_child(a)
+        self.root.activate()
+        for child in self.root.children:
+            child.activate()
     
     #
     # Wrapper function around gt-cfr to handle fully solving a 
     # subset of cfvn queries made during gt-cfr
     #
-    def training_gt_cfr(self) -> tuple[np.ndarray, np.ndarray]:
+    def training_gt_cfr(self):
         #
         # Check starting game tree
         # We start with a root node and its children
@@ -374,17 +375,13 @@ class GTCFRAgent():
         #
         # Run gt-cfr
         #
-        value, policy, queries = self.gt_cfr()
+        queries = self.gt_cfr()
         #
         # Fully solve a subset of cvpn queries from this gt_cfr run
         #
         for q in queries:
             if random.random() < self.prob_query_solve:
                 self.queries_to_solve.append(q)
-        #
-        # Return gt-cfr results
-        #
-        return policy, value
 
     #
     # Return a policy and value estimate for the current game state using gt-cfr
@@ -401,7 +398,11 @@ class GTCFRAgent():
         #
         # GT-CFR training run 
         #
-        return self.training_gt_cfr()
+        self.training_gt_cfr()
+        #
+        # Return the computed strategies and values for the root node
+        #
+        return np.copy(self.root.strategy), np.copy(self.root.values)
 
     #
     # Play through one hand of poker using gt-cfr to estimate
