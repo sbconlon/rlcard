@@ -105,6 +105,10 @@ class CounterfactualValueNetwork:
         #
         values_output = Dense(num_players * 1326, activation='linear')(layer)
         values_output = tf.keras.layers.Reshape((num_players, 1326))(values_output)
+        #
+        # Putting it all together into a model
+        #
+        self.network = Model(inputs=inputs, outputs=[strategy_output, values_output])
 
         #
         # This is a queue of querries to be fully solved using GT-CFR
