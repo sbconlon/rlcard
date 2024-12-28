@@ -452,7 +452,10 @@ class CounterfactualValueNetwork:
                     print(f'--> {update_iter}: Batch loss {update_loss}')
             #
             # Else, we need to wait for cfvn solver workers to put
-            # more targets on the replay buffer
+            # more targets on the replay buffer.
+            #
+            # Note: In practice, the replay buffer should rarely, if ever,
+            #       have less than 32 targets in it.
             #
             else:
                 time.sleep(wait_time)
