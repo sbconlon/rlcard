@@ -26,8 +26,8 @@
 # ========================================================================= #
 
 # External imports
+from multiprocessing import Process, Queue
 import numpy as np
-from queue import Queue
 import tensorflow as tf
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense, Input
@@ -35,6 +35,7 @@ import time
 
 # Internal imports
 from rlcard.agents.gt_cfr_agent.fifo_buffer import FIFOBuffer
+from rlcard.agents.gt_cfr_agent.gt_cfr_agent import GTCFRSolver
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
 
 #
@@ -81,7 +82,8 @@ class CounterfactualValueNetwork:
                        values_w: float =1,                      # Value  head weight
                        max_replay_buffer_size: int =int(1e6),   # Max replay buffer size 
                        max_grad_updates_per_exmpl: int =10,     # Max times an exmpl can be used in the replay buffer
-                       q_recursive: float =0.1):                # Prob. of adding a recursive query to the query queue
+                       q_recursive: float =0.1,                 # Prob. of adding a recursive query to the query queue
+                       n_query_solvers: int =2):                # Num. of procs solving querries off the query queue
         #
         # Store training parameters
         #
@@ -169,22 +171,119 @@ class CounterfactualValueNetwork:
         self.query_queue = Queue()
 
         #
+        # Initialize query solver processes
+        #
+        # These processes work in parallel.
+        #
+        # Query solver loop:
+        #   1. Pull querries off the query queue
+        #   2. Fully solve the query using GT-CFR
+        #   3. Add the solved targets onto the replay buffer
+        #   4. Repeat.
+        #
+        assert n_query_solvers >= 0, "Cant have a negative number of workers"
+        self.n_query_solvers = n_query_solvers # Num. of solver processes
+        self.init_query_solvers()
+
+        #
         # This is a buffer of solved querries.
         #
         # Note: this is the CVFN training set.
         #
         # Solved querries are add to the replay buffer in two ways:
         #
-        #    1. By CVFN worker processes that fully solve queries off the query queue
+        #    1. By query solver workers that fully solve queries off the query queue
         #
         #    2. By the GT-CFR agent after self-play game states have been solved
-        #       (Note: this is NOT true for the poker implementation)
+        #       (Note: this feature is DISABLED by default)
         #
-        # Note: this is a FIFO buffer of fixed size
+        # Note: this is a thread safe FIFO buffer of fixed size
         #
         self.max_replay_buffer_size = max_replay_buffer_size
         self.replay_buffer = FIFOBuffer(max_size=max_replay_buffer_size,
                                         evict_after_n_samples=max_grad_updates_per_exmpl)
+
+    #
+    # Initialize the process pool for query solvers.
+    #
+    def init_query_solvers(self) -> None:
+        #
+        # If the class constructor was called with 0 workers set,
+        # then we disable asynchronous query solving.
+        #
+        # Note: If the query solvers are disabled, then the process of 
+        #       solving querries on the query queue and moving the solved 
+        #       targets to the replay buffer needs to be handled somewhere else.
+        #
+        #       Practically speaking, the query solvers should never be disabled.
+        #       But, for debugging purposes, it can be useful to control the
+        #       flow of querries manually.
+        #
+        if self.n_query_solvers == 0:
+            self.solvers = None
+            return
+        #
+        # Initialize the list of GT-CFR solvers for each worker
+        #
+        # self.solvers[worker id]
+        #   = GT-CFR solver object for the query solver with thread id = worker id
+        #
+        self.solvers = [GTCFRSolver(prob_query_solve=self.q_recursive) for _ in self.n_query_solvers]
+        #
+        # Spawn the worker processes
+        #
+        for worker_id in range(self.n_query_solvers):
+            p = Process(target=self.query_solver_loop, args=(worker_id))
+    
+    #
+    # Loop for the query solver tasks
+    #
+    # worker_id - id of the thread executing this function
+    #
+    def query_solver_loop(self, worker_id: int) -> None:
+        #
+        # Loop indefinately...
+        #
+        while True:
+            #
+            # Fail gracefully if a worker thead encounters
+            # an error when solving a query.
+            #
+            try:
+                #
+                # Get the next query off the query queue
+                #
+                # Wait if the query queue is empty
+                #
+                # query[0] = input vector
+                #
+                query = self.query_queue.get(block=True)
+                #
+                # Convert the input vector back to the game object
+                # and player ranges that produced it.
+                #
+                # NOTE - Should we just store this information in the query tuple?
+                #        Either we use memory to store it or compute to recover it.
+                #
+                game, player_ranges = self.from_vect(query[0])
+                #
+                # Solve the query
+                #
+                # NOTE - Should we use the opponent player's value estimate from the querry
+                #        as the solver's terminate gadget value?
+                #
+                target_strat, target_values = self.solvers[worker_id].solve(game, player_ranges)
+                #
+                # Place the solved query on the replay buffer
+                #
+                self.replay_buffer.put((query[0], target_strat, target_values))
+            
+            #
+            # Output the worker error to the console
+            #
+            except Exception as e:
+                print(f'Worker {worker_id} error: {e}')
+        
 
     #
     # Given a game object and player ranges,
@@ -297,7 +396,7 @@ class CounterfactualValueNetwork:
     def add_to_query_queue(self, query: np.ndarray) -> None:
         assert query.shape == (self.input_dim,)
         self.query_queue.put(query)
-    
+
     #
     # Add a solved query to the replay buffer
     #
@@ -463,6 +562,3 @@ class CounterfactualValueNetwork:
             # Increment batch counter
             #
             update_iter += 1
-
-
-

@@ -24,7 +24,7 @@ class GTCFRSolver():
     # Initialize the GT-CFR Solver parameters and
     # the counterfactual value network.
     #
-    def __init__(self):
+    def __init__(self, prob_query_solve: float =0.9):
         #
         # Initialize the counterfactual value model
         #
@@ -33,10 +33,11 @@ class GTCFRSolver():
         self.cfvn = CounterfactualValueNetwork()
         
         #
-        # Probability of solving a given cvpn query
+        # Probability of fully solving a given cfvn query
         # encountered during GT-CFR solving.
         #
-        self.prob_query_solve = 0.9
+        assert 0 < prob_query_solve <= 1, "Invalid solve query probability"
+        self.prob_query_solve = prob_query_solve
         
         #
         # Number of expansion simulations per gt-cfr run
