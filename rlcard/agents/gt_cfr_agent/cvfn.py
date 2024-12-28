@@ -31,6 +31,7 @@ from queue import Queue
 import tensorflow as tf
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense, Input
+import time
 
 # Internal imports
 from rlcard.agents.gt_cfr_agent.fifo_buffer import FIFOBuffer
@@ -61,8 +62,8 @@ class CounterfactualValueNetwork:
     #   - Values - value distribution over hands for each player at the game state
     #              shape=(num players, 1326)
     #
-    # Note 1: For now, the network is hard coded to use a MLP network
-    #         because this is what was used in the literature.
+    # Note 1: For now, the network is hard coded to use a MLP architecture
+    #         because that is what was used in the literature.
     #
     # Note 2: Network parameters default to the values used in the literature.
     #
@@ -75,12 +76,32 @@ class CounterfactualValueNetwork:
                        optimizer: str ='adam',                  # Optimizer
                        init_learning_rate: float =0.0001,       # Initial learning rate
                        decay_rate: float =0.5,                  # Rate at which the lr is decayed
-                       decay_steps: int =2e6,                   # Num. steps lr is decayed by decay_rate
+                       decay_steps: int =int(2e6),              # Num. steps lr is decayed by decay_rate
                        policy_w: float =0.01,                   # Policy head weight
-                       policy_v: float =1,                      # Value  head weight
+                       values_w: float =1,                      # Value  head weight
                        max_replay_buffer_size: int =int(1e6),   # Max replay buffer size 
                        max_grad_updates_per_exmpl: int =10,     # Max times an exmpl can be used in the replay buffer
                        q_recursive: float =0.1):                # Prob. of adding a recursive query to the query queue
+        #
+        # Store training parameters
+        #
+        self.batch_size = batch_size
+        self.init_learning_rate = init_learning_rate
+        self.decay_rate = decay_rate
+        self.decay_steps = decay_steps
+        self.policy_w = policy_w
+        self.values_w = values_w
+
+        #
+        # Initialize the optimizer
+        #
+        # NOTE - Right now only the adam optimizer is supported
+        #
+        if optimizer == 'adam':
+            self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.init_learning_rate)
+        else:
+            raise f"Unsupported optimizer type: {optimizer}"
+
         #
         # Compute the input dimension
         # according to the given number of players in the game
@@ -88,7 +109,15 @@ class CounterfactualValueNetwork:
         self.num_players = num_players
         self.num_actions = num_actions
         self.input_dim = (2*self.num_players + 53) + (1326*self.num_players) # See to_vect()
-        
+
+        #
+        # Set the data type for the model's inputs/outputs
+        #
+        # NOTE - For now hard code this to float64, in the future
+        #        lower precision options could be interesting to explore.
+        #
+        self.data_type = np.float64
+
         #
         # --> Construct the MLP network
         #
@@ -104,9 +133,10 @@ class CounterfactualValueNetwork:
         #
         # Strategy output, (num_actions, 1326)
         #
-        # NOTE - 'linear' is a place holder, what activation do we actually want?
+        # NOTE - I think 'softmax' is the activation we want here because it yeilds
+        #        normalized probability estimates.
         #
-        strategy_output = Dense(num_actions * 1326, activation='linear')(layer)
+        strategy_output = Dense(num_actions * 1326, activation='softmax')(layer)
         strategy_output = tf.keras.layers.Reshape((num_actions, 1326))(strategy_output)
         #
         # Values output, (num_players, 1326)
@@ -116,7 +146,7 @@ class CounterfactualValueNetwork:
         values_output = Dense(num_players * 1326, activation='linear')(layer)
         values_output = tf.keras.layers.Reshape((num_players, 1326))(values_output)
         #
-        # Putting it all together into a model
+        # Putting it all together into a model object
         #
         self.network = Model(inputs=inputs, outputs=[strategy_output, values_output])
 
@@ -135,6 +165,7 @@ class CounterfactualValueNetwork:
         # Querries are taken off this queue by cvfn workers who fully solve
         # the query using gt-cfr and add the result to the replay buffer.
         #
+        self.q_recursive = q_recursive # prob. of adding a recursive query to the queue
         self.query_queue = Queue()
 
         #
@@ -196,23 +227,23 @@ class CounterfactualValueNetwork:
         # For now, we hard code this to be np.float64, the largest data type
         # of the features.
         #
-        data_type = np.float64
+        self.data_type = np.float64
         #
         # --> Featurize game object
         #
         # N-hot encoding of public cards
         #
-        public_card_encoding = np.zeros(52, dtype=data_type)
+        public_card_encoding = np.zeros(52, dtype=self.data_type)
         public_card_encoding[[card.to_int() for card in game.public_cards]] = 1
         #
         # Player pot commitments (normalized by stack size at the start of the hand)
         #
         pot_commitments = np.array([player.in_chips / (player.remained_chips + player.in_chips)
-                                        for player in game.players], dtype=data_type)
+                                        for player in game.players], dtype=self.data_type)
         #
         # 1-hot acting player encoding
         #
-        acting_player = np.zeros(game.num_players + 1, dtype=data_type)
+        acting_player = np.zeros(game.num_players + 1, dtype=self.data_type)
         acting_player[-1 if chance_actor else game.game_pointer] = 1
         #
         # --> Featurize player ranges
@@ -222,8 +253,8 @@ class CounterfactualValueNetwork:
         #
         # Each of these matrices needs to be flattened into 1326 vector.
         #
-        # Note: These matrices have at most 1326 non-zero entries, matching our
-        #       expected vector size.
+        # Note: These matrices have at most 1326 non-zero entries, 
+        #       matching our expected vector size.
         #
         #       Upper triangular matrix elements = 52*(52+1)/2 = 1378 non-zero elems
         #       
@@ -231,7 +262,7 @@ class CounterfactualValueNetwork:
         #
         assert self.num_players == game.num_players, "Game state and network num players mismatch"
         assert ranges.shape == (self.num_players, 52, 52), "Unrecognized player range shape"
-        range_vect = np.zeros(1326*game.num_players, dtype=data_type)
+        range_vect = np.zeros(1326*game.num_players, dtype=self.data_type)
         triu_indices = np.triu_indices(52, k=1) # indicies of elems in the upper triangular matrix
         for pid in range(game.num_players):
             range_vect[1326*pid:1326*(pid+1)] = ranges[pid][triu_indices]
@@ -288,5 +319,147 @@ class CounterfactualValueNetwork:
         self.replay_buffer.put(solved_query)
 
     #
-    # 
+    # Sample batch_size number of training targets from the repaly buffer
     #
+    # Lump the targets into numpy arrays
+    #
+    #   - inputs, shape=(batch_size, input_dim)
+    #
+    #   - target_strategy, shape=(batch_size, num_actions, 1326)
+    #
+    #   - target_values, shape=(batch_size, num_players, 1326)
+    #
+    # Return these arrays.
+    #
+    def get_batch_data(self) -> tuple[np.ndarray]:
+        #
+        # Sample query targets from the replay buffer.
+        #
+        # query_targets = [(input, strategy, values), ...]
+        #
+        # Note: The sampling process has a bias towards selecting
+        #       newer training targets as they should be more
+        #       accurate than older targets.
+        #
+        query_targets = self.replay_buffer.sample(self.batch_size)
+        #
+        # Initialize the output arrays
+        #
+        inputs = np.zeros((self.batch_size, self.input_dim), dtype=self.data_type)
+        target_strategies = np.zeros((self.batch_size, self.num_actions, 1326), dtype=self.data_type)
+        target_values = np.zeros((self.batch_size, self.num_players, 1326), dtype=self.data_type)
+        #
+        # Populate the output arrays
+        #
+        for i, token in enumerate(query_targets):
+            inputs[i, :] = token[0]
+            target_strategies[i, :, :] = token[1]
+            target_values[i, :, :] = token[2]
+        #
+        # Return the output arrays
+        #
+        return inputs, target_strategies, target_values
+    
+    #
+    # Perform a single batch update on the network
+    #
+    # Return the model's batch loss for this update
+    #
+    def batch_update(self) -> float:
+        #
+        # Get batch data
+        #
+        inputs, target_strats, target_values = self.get_batch_data()
+        #
+        # Update the learning rate
+        #
+        num_iters = tf.keras.backend.get_value(self.optimizer.iterations)
+        learning_rate = self.init_learning_rate * (self.decay_rate ** (num_iters / self.decay_steps))
+        tf.keras.backend.set_value(self.optimizer.learning_rate, learning_rate)
+        #
+        # Perform prediction and compute the total loss
+        #
+        with tf.GradientTape() as tape:
+            #
+            # Forward pass
+            #
+            pred_strats, pred_values = self.network(inputs, training=True)
+            #
+            # Compute losses
+            #
+            # Strategy loss = KL Divergence loss
+            #
+            strat_loss = tf.reduce_mean(
+                tf.keras.losses.KLDivergence()(target_strats, pred_strats)
+            )
+            #
+            # Value loss = Huber loss
+            #
+            value_loss = tf.reduce_mean(
+                tf.keras.losses.Huber()(target_values, pred_values)
+            )
+            #
+            # Total loss, weighted sum.
+            #
+            total_loss = self.policy_w * strat_loss + self.values_w * value_loss
+        #
+        # Compute gradients
+        #
+        gradients = tape.gradient(total_loss, self.network.trainable_variables)
+        #
+        # Apply gradients using Adam optimizer
+        #
+        self.optimizer.apply_gradients(zip(gradients, self.network.trainable_variables))
+        #
+        # Return the total loss as a numpy array
+        #
+        return total_loss
+    
+    #
+    # Train the network
+    #
+    # niters = number of batch updates to run per train() call
+    #
+    # wait_time = number of seconds to wait for new targets on the replay buffer.
+    #
+    # By default, niters -> infinity, training updates run continously.
+    #
+    def train(self, niters: int =np.inf, wait_time: int =0):
+        #
+        # Track the number of updates we perform
+        #
+        update_iter = 0
+        #
+        # Perform batch updates...
+        #
+        while update_iter < niters:
+            #
+            # Only run a batch update if we have enough targets
+            # in the replay buffer.
+            #
+            if self.replay_buffer.size() >= self.batch_size:
+                #
+                # Perform batch update
+                #
+                update_loss = self.batch_update()
+                #
+                # NOTE - In the future, we should be storing the loss updates
+                #        to plot them over time.
+                #
+                # Print the update loss every 1000 updates
+                #
+                if update_iter % 1000 == 0:
+                    print(f'--> {update_iter}: Batch loss {update_loss}')
+            #
+            # Else, we need to wait for cfvn solver workers to put
+            # more targets on the replay buffer
+            #
+            else:
+                time.sleep(wait_time)
+            #
+            # Increment batch counter
+            #
+            update_iter += 1
+
+
+
