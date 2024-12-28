@@ -33,6 +33,7 @@ from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense, Input
 
 # Internal imports
+from rlcard.agents.gt_cfr_agent.fifo_buffer import FIFOBuffer
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
 
 #
@@ -70,7 +71,16 @@ class CounterfactualValueNetwork:
                        num_neurons_per_layer: int =2048,        # Neurons per layer
                        num_layers: int =6,                      # Num. of hidden layers
                        activation_func: str ='relu',            # Activation function for hidden layers
-                       max_replay_buffer_size: int = int(1e6)): # Max replay buffer size 
+                       batch_size: int =1024,                   # Batch size
+                       optimizer: str ='adam',                  # Optimizer
+                       init_learning_rate: float =0.0001,       # Initial learning rate
+                       decay_rate: float =0.5,                  # Rate at which the lr is decayed
+                       decay_steps: int =2e6,                   # Num. steps lr is decayed by decay_rate
+                       policy_w: float =0.01,                   # Policy head weight
+                       policy_v: float =1,                      # Value  head weight
+                       max_replay_buffer_size: int =int(1e6),   # Max replay buffer size 
+                       max_grad_updates_per_exmpl: int =10,     # Max times an exmpl can be used in the replay buffer
+                       q_recursive: float =0.1):                # Prob. of adding a recursive query to the query queue
         #
         # Compute the input dimension
         # according to the given number of players in the game
@@ -137,11 +147,13 @@ class CounterfactualValueNetwork:
         #    1. By CVFN worker processes that fully solve queries off the query queue
         #
         #    2. By the GT-CFR agent after self-play game states have been solved
+        #       (Note: this is NOT true for the poker implementation)
         #
         # Note: this is a FIFO buffer of fixed size
         #
         self.max_replay_buffer_size = max_replay_buffer_size
-        self.replay_buffer = Queue()
+        self.replay_buffer = FIFOBuffer(max_size=max_replay_buffer_size,
+                                        evict_after_n_samples=max_grad_updates_per_exmpl)
 
     #
     # Given a game object and player ranges,
@@ -261,6 +273,20 @@ class CounterfactualValueNetwork:
     # Solved query
     #   = tuple(input vector, output strategy, output values)
     #
-    def add_to_replay_buffer(self, solved_query) -> None:
-        if self.replay_buffer.qsize() > self.max_replay_buffer_size:
-            self.replay_buffer.
+    def add_to_replay_buffer(self, solved_query: tuple[np.ndarray]) -> None:
+        #
+        # Verify the given solved query is well-formatted
+        #
+        assert len(solved_query) == 3, "Solved query must be of format, (input, output strategy, output values)"
+        assert all(isinstance(solved_query[i], np.ndarray) for i in range(3)), "Unexpected solved query type"
+        assert solved_query[0].shape == (self.input_dim,), "Unexpected input dimension"
+        assert solved_query[1].shape == (self.num_actions, 1326), "Unexpected output strategy dimension"
+        assert solved_query[2].shape == (self.num_players, 1326), "Unexpected output values dimension"
+        #
+        # Add the solved query to the FIFO buffer
+        #
+        self.replay_buffer.put(solved_query)
+
+    #
+    # 
+    #

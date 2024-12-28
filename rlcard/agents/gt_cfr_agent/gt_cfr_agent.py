@@ -5,9 +5,10 @@ import numpy as np
 import random
 
 # Internal imports
-from rlcard.envs.nolimitholdem import NolimitholdemEnv
+from rlcard.agents.gt_cfr_agent.cvfn import CounterfactualValueNetwork
 from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode
-from rlcard.agents.gt_cfr_agent.utils import rand_value, initial_hand_values
+#from rlcard.agents.gt_cfr_agent.utils import rand_value, initial_hand_values
+from rlcard.envs.nolimitholdem import NolimitholdemEnv
 
 class GTCFRAgent():
     #
@@ -20,44 +21,43 @@ class GTCFRAgent():
         self.env = env
         
         #
-        # Replay buffer
+        # Initialize the counterfactual value model
         #
-        self.replay_buffer = []
+        # NOTE - right now the cfvn is automatically initialized with default params
+        #
+        self.cfvn = CounterfactualValueNetwork()
 
         #
-        # Cap the number of moves that can be made in a self play cycle
+        # Cap the number of moves that can be made in a self play episode
         #
-        self.max_moves = 10
+        self.max_moves = np.inf # disabled by default
 
         #
         # Minimum counterfactual value to continue solving
         #
-        self.resign_threshold = 0
+        self.resign_threshold = 0 # disabled by default
 
         #
         # Exploration parameter
         #
-        self.epsilon = 0.1
+        self.epsilon = 0.1 # self-play uniform policy mix
 
         #
         # Select the greedy action during self play after n moves
         #
-        self.greedy_after_n_moves = 10
+        self.greedy_after_n_moves = np.inf # disabled by default
 
         #
         # Probability of adding an entry into the replay buffer
         #
-        self.prob_add_to_buffer = 0.5
+        self.prob_add_to_buffer = 0 # called 'p_td1' in the literature
+                                    # disabled by default
 
         #
         # Probability of solving a given cvpn query
+        # encountered during GT-CFR solving.
         #
-        self.prob_query_solve = 0.5
-
-        #
-        # Buffer of cvpn querries to solve
-        #
-        self.queries_to_solve = []
+        self.prob_query_solve = 0.9
 
         #
         # Number of expansion simulations per gt-cfr run
@@ -355,6 +355,10 @@ class GTCFRAgent():
         #
         CFRNode.set_root_pid = self.root.game.game_pointer
         #
+        # Store a reference to the CVFN in the game tree
+        #
+        self.root.set_cvfn(self.cvfn)
+        #
         # Activate the root node and its children
         #
         self.root.activate()
@@ -381,7 +385,7 @@ class GTCFRAgent():
         #
         for q in queries:
             if random.random() < self.prob_query_solve:
-                self.queries_to_solve.append(q)
+                self.cvfn.add_to_query_queue(q)
 
     #
     # Return a policy and value estimate for the current game state using gt-cfr
@@ -497,4 +501,4 @@ class GTCFRAgent():
         #
         for token in trajectory:
             if random.random() < self.prob_add_to_buffer:
-                self.replay_buffer.append(token)        
+                self.cvfn.add_to_replay_buffer(token)
