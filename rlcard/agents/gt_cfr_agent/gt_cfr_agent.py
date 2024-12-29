@@ -64,90 +64,6 @@ class GTCFRSolver():
         self.root = None
 
     #
-    # Initialize the gadget game
-    #
-    # A key idea of re-solving for imperfect information games
-    #
-    # For any player making a decision at a game state, 
-    # they must consider that their opponent can choose to steer the game 
-    # toward that game state or not.
-    #
-    # The example used in the literature is rock-paper-scissors.
-    #
-    #     - Player 1 selects an action (r-p-s) that's hidden from Player 2
-    #
-    #     - At Player 2's decision node, they must reason about how frequently
-    #       Player 1 chooses to play toward each state.
-    #
-    #       i.e. the frequency at which Player 1 chooses each action
-    #
-    #     - This reasoning about their opponent's strategy in an ancestor node,
-    #       then informs their strategy in the current node.
-    #
-    #       e.x. If Player 2 knows that Player 1 always chooses to play toward the paper node, then
-    #            their optimal strategy at that node would be to always play Scissors.
-    #
-    #
-    # This is reasoning is modeled here by the "regret gadget" 
-    # 
-    # The oppponent has two (fictitious) actions:
-    #
-    #     - "Follow"    (F) - choose to play toward the root state
-    #
-    #     - "Terminate" (T) - reject the root state, select actions to play away from the root state
-    # 
-    # The values for the two actions:
-    #
-    #     - value for following   (f_values) - the opponent's values at the 
-    #                                          root state of the cfr tree.
-    #                                          = self.root.player_values[opponent player id]
-    #
-    #     - value for terminating (t_values) - this an input for re-solving
-    #                                          and is either heuristically derived
-    #                                          or taken from the solution of a previous CFR run
-    #                                          = self.terminate_values
-    #
-    # Using these values, the opponent can compute an associated "gadget regret" and
-    # "gadget strategy" for the follow-or-terminate gadget decision.
-    #
-    # This strategy can then be taken as the opponent's range in the root node
-    # of the CFR for the next CFR value update iteration.
-    # 
-    # To initialize the gadget game, we need to
-    # compute the opponent's values for choosing the Terminate gadget action
-    #
-    # This is to account for the fact that the opponents can steer the game 
-    # away from this public state in their ancestor decision nodes.
-    #
-    #     Case 1: This is the start of the game. We need to use a heuristic
-    #     to estimate the player's values. This can be done by precomputing the
-    #     winning percentage of each hand if the game checked to showdown.
-    #
-    #     Case 2: This is not the start of the game. Use the opponent players' values
-    #     from the previous CFR run.
-    #
-    # Note: The naming conventions here are a tad confusing. 'terminate_values' is
-    #       the payoff matrix the opponent player recieves in the gadget game
-    #       when she selects the Terminate action.
-    #
-    #       This is not to be confused with the 'gadget_values' which is the opponent's
-    #       expected value in the gadget game according to their current gadget strategy
-    #       and the current cfr values at the root node.
-    #
-    #       So, the word 'values' here is used twice to mean two different things.
-    #
-    #       This arises because the gadget game is a meta-game. In the gadget game,
-    #       the opponent is seeking to maximize her expected value from payoffs, but 
-    #       those payoffs are themselves values for the real game. 
-    #
-    def init_gadget_game(self):
-        """TODO - impliment this part - currently a place filler"""
-        self.terminate_values = np.zeros((52, 52)) # = t_values = v_2 in the literature
-        ''''''
-        self.gadget_regrets = np.zeros(2, 52, 52) # 2 gadget actions, (Follow, Terminate)
-        self.gadget_values = np.zeros(52, 52)
-    
-    #
     # Initialize the starting game tree
     #
     # input_game - game state that was input for solving,
@@ -192,69 +108,6 @@ class GTCFRSolver():
             child.activate()
 
     #
-    # Update the regrets in the gadget game
-    #
-    # NOTE - implement this function for >2 player games, shouldn't be too hard
-    #
-    def update_gadget_regrets(self):
-        #
-        # Compute the gadget strategy using the gadget regrets
-        #
-        # Note 1: Because there are only two actions for this decision (T, F),
-        #         we only need to compute the prob. of selecting one action.
-        #         
-        #         Here we choose to compute the follow prob. because it is
-        #         used by the cfr root node.
-        #
-        # Note 2: Let, self.gadget_regret[0] be the Follow    action regrets
-        #         and, self.gadget_regret[1] be the Terminate action regrets
-        #
-        gadget_regrets_positives = np.maximum(self.gadget_regrets, 0)
-        gadget_follow_strat = gadget_regrets_positives[0] / (gadget_regrets_positives[0] + gadget_regrets_positives[1])
-
-        #
-        # Set the opponent's range in the cfr root node to the gadget's follow strategy 
-        #
-        # Reasoning:
-        #     Gadget follow strat = probability of choosing to play toward the cfr root state
-        #     Opp. root range = prob. of the opp. reaching this state given her strategy
-        #     Therefore, gadget follow strat = opponent's range at the root node. 
-        #
-        opp_pid = (self.root.game.game_pointer + 1) % 2
-        self.root.player_ranges[opp_pid] = gadget_follow_strat
-
-        #
-        # Compute the updated gadget values
-        #
-        # This is a standard expected value computation.
-        #
-        new_gadget_values = (gadget_follow_strat * self.gadget_values[0] + 
-                             (1 - gadget_follow_strat) * self.gadget_values[1])
-
-        #
-        # Update the gadget regrets
-        #
-        # Subtle point:
-        #     - If the opponent chooses to Follow    then they recieve the gadget value at iteration t
-        #     - If the opponent chooses to Terminate then they recieve the gadget value at iteration t - 1
-        #
-        # Why?
-        #     - I think because, conceptually, if the opponent is choosing to terminate at time t, then
-        #       they don't get to observe the payoffs that would've happened to the CFR tree at time t
-        #
-        # Note:
-        #    - Always selecting Follow    yields a fixed payoff equal to the opp. cfr values at the root node
-        #    - Always selecting Terminate yields a fixed payoff equal to the terminate values
-        #
-        self.gadget_regrets[0] += self.root.values[opp_pid] - new_gadget_values[0] # gadget value @ t
-        self.gadget_regrets[1] += self.terminate_values - self.gadget_values[1] # gadget value @ t + 1
-
-        #
-        # Update the gadget values to the new values
-        #
-        self.gadget_values = new_gadget_values
-
-    #
     # Public tree counterfactual regret minimization.
     #
     # CFR starts on the root state, self.root, and recurses down through
@@ -269,10 +122,6 @@ class GTCFRSolver():
             # Perform one iteration of value and strategy updates on the game tree
             #
             self.root.update_values()
-            #
-            # Update gadget regrets
-            #
-            self.update_gadget_regrets()
 
     #
     # Add a node to the game tree
@@ -373,11 +222,11 @@ class GTCFRSolver():
         #
         queries = self.gt_cfr()
         #
-        # Fully solve a subset of cvpn queries from this gt_cfr run
+        # Fully solve a subset of cfvn queries from this gt_cfr run
         #
         for q in queries:
             if random.random() < self.prob_query_solve:
-                self.cvfn.add_to_query_queue(q)
+                self.cfvn.add_to_query_queue(q)
 
     #
     # Return a policy and value estimate for the current game state using gt-cfr
@@ -387,15 +236,11 @@ class GTCFRSolver():
     #   1. No starting information is given
     #
     #
-    def solve(self, game: NolimitholdemGame) -> tuple[np.ndarray, np.ndarray]:
-        #
-        # Initialize the gadget game
-        #
-        self.init_gadget_game()
+    def solve(self, game: NolimitholdemGame, player_ranges: np.ndarray =None) -> tuple[np.ndarray, np.ndarray]:
         #
         # Initialize the game tree for cfr
         #
-        self.init_game_tree(game)
+        self.init_game_tree(game, ranges=player_ranges)
         #
         # GT-CFR training run 
         #
@@ -538,7 +383,15 @@ class GTCFRAgent():
                 trajectory.append((state, cfr_values, cfr_policies))
 
         #
-        # Add to replay buffer
+        # Add to replay buffer - disabled by default
+        #
+        # At this step, we know the actual outcome of the game that
+        # was played, so we can use this as a target value for the cfvn.
+        #
+        # NOTE - I'm not sure the code I have written here is exactly correct.
+        #        I'm choosing to leave it as is because it is currently disabled.
+        #        If this code were to become active, it should be checked for 
+        #        correctness.
         #
         if self.prob_add_to_buffer > 0: # disabled by default
             for token in trajectory: 

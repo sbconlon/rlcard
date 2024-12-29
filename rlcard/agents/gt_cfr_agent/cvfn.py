@@ -263,8 +263,13 @@ class CounterfactualValueNetwork:
                 # Convert the input vector back to the game object
                 # and player ranges that produced it.
                 #
-                # NOTE - Should we just store this information in the query tuple?
-                #        Either we use memory to store it or compute to recover it.
+                # NOTE - Q: Should we just store this information in the query tuple?
+                #           Either we use memory to store it or compute to recover it.
+                #
+                #        A: The query queue is unbounded and could be millions of
+                #           entries long, depending on how fast the solver workers
+                #           can process entries. In this case, the added memory
+                #           load would be significant.
                 #
                 game, player_ranges = self.from_vect(query[0])
                 #
