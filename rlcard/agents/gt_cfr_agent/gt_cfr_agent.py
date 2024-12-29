@@ -24,13 +24,13 @@ class GTCFRSolver():
     # Initialize the GT-CFR Solver parameters and
     # the counterfactual value network.
     #
-    def __init__(self, prob_query_solve: float =0.9):
+    def __init__(self, input_cfvn: CounterfactualValueNetwork =None, prob_query_solve: float =0.9):
         #
-        # Initialize the counterfactual value model
+        # Initialize the counterfactual value model, if one is not given.
         #
         # NOTE - right now the cfvn is automatically initialized with default params
         #
-        self.cfvn = CounterfactualValueNetwork()
+        self.cfvn = CounterfactualValueNetwork() if input_cfvn is None else input_cfvn
         
         #
         # Probability of fully solving a given cfvn query
@@ -84,11 +84,11 @@ class GTCFRSolver():
     #     - This reasoning about their opponent's strategy in an ancestor node,
     #       then informs their strategy in the current node.
     #
-    #       e.x. if they know Player 1 always chooses to play toward the paper node, then
+    #       e.x. If Player 2 knows that Player 1 always chooses to play toward the paper node, then
     #            their optimal strategy at that node would be to always play Scissors.
     #
     #
-    # This is modeled here by the "regret gadget" 
+    # This is reasoning is modeled here by the "regret gadget" 
     # 
     # The oppponent has two (fictitious) actions:
     #
@@ -151,7 +151,7 @@ class GTCFRSolver():
     # Initialize the starting game tree
     #
     # input_game - game state that was input for solving,
-    #              serves as the root node of the game tree
+    #              serves as the root node of the game tree.
     #
     def init_game_tree(self, input_game: NolimitholdemGame):
         #
@@ -209,8 +209,8 @@ class GTCFRSolver():
         # Note 2: Let, self.gadget_regret[0] be the Follow    action regrets
         #         and, self.gadget_regret[1] be the Terminate action regrets
         #
-        gadget_regrets_pos = np.maximum(self.gadget_regrets, 0)
-        gadget_follow_strat = gadget_regrets_pos[0] / (gadget_regrets_pos[0] + gadget_regrets_pos[1])
+        gadget_regrets_positives = np.maximum(self.gadget_regrets, 0)
+        gadget_follow_strat = gadget_regrets_positives[0] / (gadget_regrets_positives[0] + gadget_regrets_positives[1])
 
         #
         # Set the opponent's range in the cfr root node to the gadget's follow strategy 
@@ -255,8 +255,10 @@ class GTCFRSolver():
         self.gadget_values = new_gadget_values
 
     #
-    # Public tree counterfactual regret minimization
-    # cfr starts on the root state, self.root
+    # Public tree counterfactual regret minimization.
+    #
+    # CFR starts on the root state, self.root, and recurses down through
+    # the game tree nodes.
     #
     def cfr(self) -> None:
         #
@@ -379,6 +381,11 @@ class GTCFRSolver():
 
     #
     # Return a policy and value estimate for the current game state using gt-cfr
+    #
+    # Three ways solving can start:
+    #
+    #   1. No starting information is given
+    #
     #
     def solve(self, game: NolimitholdemGame) -> tuple[np.ndarray, np.ndarray]:
         #

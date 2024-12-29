@@ -228,7 +228,7 @@ class CounterfactualValueNetwork:
         # self.solvers[worker id]
         #   = GT-CFR solver object for the query solver with thread id = worker id
         #
-        self.solvers = [GTCFRSolver(prob_query_solve=self.q_recursive) for _ in self.n_query_solvers]
+        self.solvers = [GTCFRSolver(input_cfvn=self, prob_query_solve=self.q_recursive) for _ in self.n_query_solvers]
         #
         # Spawn the worker processes
         #
@@ -255,7 +255,8 @@ class CounterfactualValueNetwork:
                 #
                 # Wait if the query queue is empty
                 #
-                # query[0] = input vector
+                # query 
+                #    = tuple(input vector, player values, player strategy)
                 #
                 query = self.query_queue.get(block=True)
                 #
