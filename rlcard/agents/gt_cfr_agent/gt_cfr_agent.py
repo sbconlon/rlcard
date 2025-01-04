@@ -88,7 +88,7 @@ class GTCFRSolver():
     #            their optimal strategy at that node would be to always play Scissors.
     #
     #
-    # This is reasoning is modeled here by the "regret gadget" 
+    # This reasoning is modeled here by the "regret gadget" 
     # 
     # The oppponent has two (fictitious) actions:
     #
@@ -113,15 +113,12 @@ class GTCFRSolver():
     # This strategy can then be taken as the opponent's range in the root node
     # of the CFR for the next CFR value update iteration.
     # 
-    # To initialize the gadget game, we need to
-    # compute the opponent's values for choosing the Terminate gadget action
-    #
-    # This is to account for the fact that the opponents can steer the game 
-    # away from this public state in their ancestor decision nodes.
+    # To initialize the gadget game, we need the opponent's values for 
+    # choosing the Terminate gadget action.
     #
     #     Case 1: This is the start of the game. We need to use a heuristic
-    #     to estimate the player's values. This can be done by precomputing the
-    #     winning percentage of each hand if the game checked to showdown.
+    #     to estimate the opponent player's values. This can be done by precomputing 
+    #     the winning percentage of each hand if the game checked to showdown.
     #
     #     Case 2: This is not the start of the game. Use the opponent players' values
     #     from the previous CFR run.
@@ -138,12 +135,17 @@ class GTCFRSolver():
     #
     #       This arises because the gadget game is a meta-game. In the gadget game,
     #       the opponent is seeking to maximize her expected value from payoffs, but 
-    #       those payoffs are themselves values for the real game. 
+    #       those payoffs are themselves values for the real game.
     #
-    def init_gadget_game(self):
-        """TODO - impliment this part - currently a place filler"""
-        self.terminate_values = np.zeros((52, 52)) # = t_values = v_2 in the literature
-        ''''''
+    # NOTE - How does the gadget game change in the >2 player game setting. 
+    #
+    def init_gadget_game(self, opponents_values :np.ndarray =None):
+        if opponents_values:
+            self.terminate_values = opponent_values
+        else:
+            """TODO - impliment this part - currently a place filler"""
+            self.terminate_values = np.zeros((52, 52)) # = t_values = v_2 in the literature
+            ''''''
         self.gadget_regrets = np.zeros(2, 52, 52) # 2 gadget actions, (Follow, Terminate)
         self.gadget_values = np.zeros(52, 52)
     
@@ -380,22 +382,62 @@ class GTCFRSolver():
                 self.cvfn.add_to_query_queue(q)
 
     #
-    # Return a policy and value estimate for the current game state using gt-cfr
+    # Return a policy and value estimate for the given game state using gt-cfr
     #
-    # Three ways solving can start:
+    # Resolving requires two additional inputs:
     #
-    #   1. No starting information is given
+    #     1. The player's range
+    #     
+    #     2. The opponent's values
     #
+    # Solve can be called with three different sets of information:
     #
-    def solve(self, game: NolimitholdemGame) -> tuple[np.ndarray, np.ndarray]:
-        #
-        # Initialize the gadget game
-        #
-        self.init_gadget_game()
+    #   1. No information
+    #      (self.root=None, opponent_values=None, player_range=None, trajectory_seed=None)
+    #
+    #        - Opponent's range is estimated using a heuristic
+    #
+    #        - Player's range is assumed to be uniform across all possible hand combinations
+    #
+    #        - self.root is initialized at the given game state
+    #
+    #        * This is used by gt_cfr_agent at the start of an episode
+    #
+    #   2. Evaluated game tree from a previous solve call
+    #      (self.root=DecisionNode(...), opponent_values=None, player_range=None, trajectory_seed=None)
+    #
+    #        - Search the existing game tree for the input game state
+    #
+    #        - If the input game state is found, 
+    #          then set it to be the new root node of the game tree.
+    #
+    #        - If the input game state is not found,
+    #          then set the closest leaf node of the game tree to be the new root node.
+    #          Add the input game state to the initial game tree.
+    #
+    #        * This is used by successive gt_cfr_agent calls during an episode
+    #
+    #   3. Empty game tree. Given opponent values, player range, and action seeds.
+    #      (self.root=None, opponent_values=np.array(...), player_range=np.array(...), trajectory_seed=[...])
+    #
+    #        - Initialize the root node with the input opponent values and player range
+    #
+    #        - Add the nodes to the game tree corresponding to the game states along the given trajectory seed
+    #
+    #        * This is used by the CFVN during training
+    #
+    def solve(self, game: NolimitholdemGame, 
+                    input_opponent_range: np.ndarray = None,
+                    input_player_range: np.ndarray = None,
+                    trajectory_seed: list[int] = None) -> tuple[np.ndarray, np.ndarray]:
         #
         # Initialize the game tree for cfr
         #
         self.init_game_tree(game)
+        #
+        # Initialize the gadget game
+        #
+        self.init_gadget_game()
         #
         # GT-CFR training run 
         #
