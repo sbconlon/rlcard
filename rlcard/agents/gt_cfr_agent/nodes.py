@@ -204,6 +204,14 @@ class CFRNode(ABC):
     @abstractmethod
     def grow_tree(self, hands : list[list[int]]) -> bool:
         pass
+    #
+    # Search this node's subtree for the node associated with the given game state.
+    # If the node is found, return it.
+    # If the node is not found, return its closest ancestor in the tree.
+    #
+    @abstractmethod
+    def search(self, game: NolimitholdemGame) -> DecisionNode:
+        pass
 
 #
 # Terminal Node
@@ -437,6 +445,13 @@ class TerminalNode(CFRNode):
     #
     def activate(self) -> None:
         pass
+    
+    #
+    # If we hit a terminal node while following the game's trajectory, then
+    # the trajectory is inavlid.
+    #
+    def search(self, game: NolimitholdemGame) -> DecisionNode:
+        raise AssertionError("Search should not be run on a terminal node")
 
 #
 # Decision node
@@ -804,6 +819,25 @@ class DecisionNode(CFRNode):
         # Recurse to the child
         #
         return self.children[action].grow_tree(hands)
+
+    #
+    # Search for the given game state in the node's subtree
+    #
+    # Note: Game states are uniquely defined by their trajectories
+    #
+    #       If two states have the same trajectores (and public cards),
+    #       then they are identical.
+    #
+    def search(self, game: NolimitholdemGame) -> DecisionNode:
+        #
+        # Get the difference in the game trajectories
+        #
+        self.game.
+        #
+        # Base case - this node's game state matches the given game state
+        #
+        
+
 
 #
 # Chance node

@@ -150,14 +150,34 @@ class GTCFRSolver():
         self.gadget_values = np.zeros(52, 52)
     
     #
+    # Search the game tree for the input game state
+    #
+    def node_search() -> CFRNode:
+        if self.root is None:
+            return None 
+
+    #
     # Initialize the starting game tree
     #
     # input_game - game state that was input for solving,
-    #              serves as the root node of the game tree.
+    #              serves as the root node of the game tree
     #
-    def init_game_tree(self, input_game: NolimitholdemGame):
+    # input_player_range - probability distribution over possible
+    #                      hands the player could given the input game state
+    #
+    # trajectory_seed - list of actions, add the game states associated with the
+    #                   chain of actions to the game tree before starting
+    #
+    def init_game_tree(self, input_game: NolimitholdemGame,
+                             input_player_range: np.ndarray =None,
+                             trajectory_seed: list[int] =None) -> None:
         #
-        # Compute the decision player's range at the root state
+        # Search the game tree (if one exists) for the input game state
+        #
+        result = game_tree_search(input_game)
+        #
+        # If the player's range is not given, then
+        # compute the decision player's range at the root state
         #
         #     Case 1: This is the start of the game. The player's
         #     range is the probability of being dealt each hand comination.
@@ -167,9 +187,12 @@ class GTCFRSolver():
         #
         # The opponent players' ranges can be randomized.
         #
-        """TODO - impliment this part"""
-        player_ranges = np.zeros((input_game.num_players, 52, 52)) # NOTE - PLACE FILLER
-        """"""
+        if input_player_range:
+            player_range = input_player_range
+        else:
+            """TODO - impliment this part"""
+            player_range = np.zeros((input_game.num_players, 52, 52)) # NOTE - PLACE FILLER
+            """"""
         #
         # Initialize the player's CFR values to zero.
         #
@@ -427,17 +450,17 @@ class GTCFRSolver():
     #        * This is used by the CFVN during training
     #
     def solve(self, game: NolimitholdemGame, 
-                    input_opponent_range: np.ndarray = None,
+                    input_opponent_values: np.ndarray = None,
                     input_player_range: np.ndarray = None,
                     trajectory_seed: list[int] = None) -> tuple[np.ndarray, np.ndarray]:
         #
         # Initialize the game tree for cfr
         #
-        self.init_game_tree(game)
+        self.init_game_tree(game, input_player_range, trajectory_seed)
         #
         # Initialize the gadget game
         #
-        self.init_gadget_game()
+        self.init_gadget_game(input_opponent_values)
         #
         # GT-CFR training run 
         #
