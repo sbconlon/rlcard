@@ -205,12 +205,12 @@ class CFRNode(ABC):
     def grow_tree(self, hands : list[list[int]]) -> bool:
         pass
     #
-    # Search this node's subtree for the node associated with the given game state.
+    # Search this node's subtree for the node with the given trajectory.
     # If the node is found, return it.
     # If the node is not found, return its closest ancestor in the tree.
     #
     @abstractmethod
-    def search(self, game: NolimitholdemGame) -> DecisionNode:
+    def search(self, trajectory: list[int]) -> DecisionNode:
         pass
 
 #
@@ -450,7 +450,7 @@ class TerminalNode(CFRNode):
     # If we hit a terminal node while following the game's trajectory, then
     # the trajectory is inavlid.
     #
-    def search(self, game: NolimitholdemGame) -> DecisionNode:
+    def search(self, trajectory: list[int]) -> DecisionNode:
         raise AssertionError("Search should not be run on a terminal node")
 
 #
@@ -821,23 +821,80 @@ class DecisionNode(CFRNode):
         return self.children[action].grow_tree(hands)
 
     #
-    # Search for the given game state in the node's subtree
+    # Search for the DecisionNode in the node's subtree corresponding
+    # to the given trajectory.
+    #
+    # If the game state is not found, then return the nearest
+    # DecisionNode ancestor in the tree where pid is making
+    # the action.
+    #
+    # pid - the acting player's at at the target game state.
+    #
+    # trajectory - sequence of actions and chance outcomes that define
+    #              the game state we are searching for.
     #
     # Note: Game states are uniquely defined by their trajectories
     #
-    #       If two states have the same trajectores (and public cards),
+    #       If two states have the same trajectores,
     #       then they are identical.
     #
-    def search(self, game: NolimitholdemGame) -> DecisionNode:
+    def search(self, pid: int, trajectory: list[int]) -> DecisionNode:
         #
-        # Get the difference in the game trajectories
+        # Get the search trajectory in the game tree
         #
-        self.game.
+        n = len(self.game.trajectory) # Number of moves from the start of the game 
+                                      # to reach this node's game state
         #
-        # Base case - this node's game state matches the given game state
+        # Check that the given search trajectory corresponds to a game state
+        # in the game tree. 
         #
-        
-
+        # i.e. the root state's trajectory must be a subset of the search trajectory
+        #
+        if trajectory[:n] != self.root.game.trajectory:
+            raise ValueError("The given search trajectory is not in the game tree")
+        #
+        # Initialize search variables
+        #
+        path = [] # path in the game tree from this node toward the target node
+        node = self
+        depth = n
+        #
+        # Traverse down the game tree as far as possible
+        #
+        while node.is_active and isinstance(node, (DecisionNode, ChanceNode)):
+            #
+            # Found case - We found a node with the given trajectory
+            #
+            if depth == len(trajectory):
+                assert trajectory == node.game.trajectory, "Node game state and trajectory mismatch"
+                assert isinstance(node, DecisionNode), "Given trajectories must correspond to decision nodes"
+                assert node.game.game_pointer == pid, "Given trajectories must correspond to decision nodes with the expected acting player"
+                return node
+            #
+            # Continue searching
+            #
+            path.append(node)
+            if isinstance(node, DecisionNode):
+                node = node.children[trajectory[depth]]
+            else:
+                node = node.outcomes[trajectory[depth]]
+            depth += 1
+        #
+        # Not found case - The search path hit the bottom of the game tree without finding
+        #                  the node, traverse back up the search path looking for a
+        #                  DecisionNode owned by the player pid.
+        #
+        while path:
+            node = path.pop()
+            if isinstance(node, DecisionNode) and node.game.game_pointer == pid:
+                return node
+        #
+        # Error case - We could not find an exact match or an ancestor match.
+        #
+        # NOTE - Throw an error for now.
+        #        In practice, this should not happen for poker.
+        #
+        raise ValueError("Given trajectory or ancestor not found")
 
 #
 # Chance node

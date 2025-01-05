@@ -150,11 +150,19 @@ class GTCFRSolver():
         self.gadget_values = np.zeros(52, 52)
     
     #
-    # Search the game tree for the input game state
+    # Search the game tree for the input game state,
+    # along the given trajectory.
     #
-    def node_search() -> CFRNode:
+    def node_search(self, target_game: NolimitholdemGame) -> DecisionNode:
+        #
+        # Can't search a null tree
+        #
         if self.root is None:
-            return None 
+            return None
+        #
+        # Return the node in the game tree, or its closest ancestor
+        #
+        return self.root.search(target_game.trajectory, target_game.game_pointer)
 
     #
     # Initialize the starting game tree
@@ -169,12 +177,34 @@ class GTCFRSolver():
     #                   chain of actions to the game tree before starting
     #
     def init_game_tree(self, input_game: NolimitholdemGame,
+                             input_opponent_values: np.ndarray =None,
                              input_player_range: np.ndarray =None,
                              trajectory_seed: list[int] =None) -> None:
         #
-        # Search the game tree (if one exists) for the input game state
+        # If we are not given input opponent values or the player's range,
+        # then search the game tree (if one exists) for the input game state
         #
-        result = game_tree_search(input_game)
+        if input_opponent_values is None or input_player_range is None:
+            # Store the acting player's id
+            pid = input_game.game_pointer
+            # Sanity check
+            if input_opponent_values != input_player_range:
+                raise ValueError("Both opponent values and player ranges should be None")
+            # Search
+            result = self.node_search(input_game)
+            #
+            # Success case - Search found a node
+            #
+            if result is not None:
+                #
+                # Make this the new root node
+                #
+                self.root = result
+                #
+                # Take the opponent's values to be the gadget values
+                #
+                self.init_gadget_game(np.copy(self.root.))
+
         #
         # If the player's range is not given, then
         # compute the decision player's range at the root state
@@ -456,11 +486,7 @@ class GTCFRSolver():
         #
         # Initialize the game tree for cfr
         #
-        self.init_game_tree(game, input_player_range, trajectory_seed)
-        #
-        # Initialize the gadget game
-        #
-        self.init_gadget_game(input_opponent_values)
+        self.init_game_tree(game, input_opponent_values, input_player_range, trajectory_seed)
         #
         # GT-CFR training run 
         #

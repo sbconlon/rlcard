@@ -40,13 +40,18 @@ class NolimitholdemGame(Game):
         self.dealer_id = None
 
         #
-        # Deterministically deal cards
+        # List of action ids and chance outcome ids
         #
+        # This uniquely identifies the game state
+        #
+        self.trajectory = []
+
+        #
+        # --> Deterministically deal cards
         #
         # Set to insure the same card isn't dealt twice
         #
         observed_cards = set()
-        
         #
         # Fix the cards that will be dealt on the flop, turn, and river
         # Cards are dealt in order (first 3 cards on the flop, etc.)
@@ -58,7 +63,6 @@ class NolimitholdemGame(Game):
             assert(not elem in observed_cards)
             observed_cards.add(elem)
         self.fixed_public_cards = fixed_public_cards
-
         #
         # Fix the cards that will be dealt to each player
         # fixed_player_cards: player_id -> [Card1, Card2]
@@ -76,7 +80,6 @@ class NolimitholdemGame(Game):
             observed_cards.add(value[0])
             observed_cards.add(value[1])
         self.fixed_player_cards = fixed_player_cards
-
         #
         # Fix the starting stage of the game
         #
@@ -96,6 +99,29 @@ class NolimitholdemGame(Game):
         self.init_chips = [game_config['chips_for_each']] * game_config["game_num_players"]
         self.dealer_id = game_config['dealer_id']
     
+    #
+    # Incode the chance outcome into a unique int identifier
+    #
+    # Note: The outcome hashes are precomputed class members.
+    #       The computation occurs when the class is imported,
+    #       then reused across all class instances.
+    #
+    one_card_outcome_hash = { (card_id,): card_id for card_id in range(52) }
+    two_card_outcome_hash = { combo: idx for idx, combo in enumerate(combinations(range(52), 2)) }
+    three_card_outcome_hash = { combo: idx for idx, combo in enumerate(combinations(range(52), 3)) }
+    
+    def outcome_to_int(outcome: list[Card]) -> int:
+        card_ids = [card.to_int() for card in outcome]
+        if len(card_ids) == 1:
+            return one_card_outcome_hash[card_ids]
+        elif len(card_ids) == 2:
+            return two_card_outcome_hash[card_ids]
+        elif len(card_ids) == 3:
+            return three_card_outcome_hash[card_ids]
+        else:
+            raise ValueError("Only expect outcomes of length 1, 2, or 3")
+        
+
     def deal_public_cards(self):
         if not self.dealer:
             raise ValueError("Dealer must be set before dealing public cards.")
@@ -120,14 +146,22 @@ class NolimitholdemGame(Game):
         
         if num_cards_needed < 0:
             raise ValueError("public_cards already contains more cards than required for this stage.")
+
+        outcome = []
         
         # Add cards from fixed_public_cards if available
         cards_from_fixed = self.fixed_public_cards[current_count:(current_count + num_cards_needed)]
-        self.public_cards += cards_from_fixed
+        outcome += cards_from_fixed
         
         # Draw additional cards from the dealer if needed
         remaining_needed = total - len(self.public_cards)
-        self.public_cards += [self.dealer.deal_card() for _ in range(remaining_needed)]
+        outcome += [self.dealer.deal_card() for _ in range(remaining_needed)]
+
+        # Update trajectory
+        self.trajectory.append(outcome)
+
+        # Update public cards
+        self.public_cards += outcome
 
     def init_game(self):
         """
@@ -166,10 +200,17 @@ class NolimitholdemGame(Game):
         # Deal cards to each  player to prepare for the first round
         for pid in range(self.num_players):
             if pid in self.fixed_player_cards:
+                # Update trajectory
+                self.trajectory.append(self.fixed_player_cards[pid])
+                # Give the player their rigged hand
                 self.players[pid].hand = self.fixed_player_cards[pid]
             else:
-                self.players[pid].hand.append(self.dealer.deal_card())
-                self.players[pid].hand.append(self.dealer.deal_card())
+                # Else, deal a random hand
+                random_hand = [self.dealer.deal_card(), self.dealer.deal_card()]
+                # Update trajectory
+                self.trajectory.append(random_hand)
+                # Give the player their random hand
+                self.players[pid].hand = random_hand
 
         # Initialize the starting stage of the game
         self.stage = self.starting_stage
@@ -246,6 +287,11 @@ class NolimitholdemGame(Game):
             p = deepcopy(self.public_cards)
             ps = deepcopy(self.players)
             self.history.append((r, b, r_c, d, p, ps))
+
+        #
+        # Update the trajectory with the action id
+        #
+        self.trajectory.append(self.get_legal_actions().index(action))
 
         # Then we proceed to the next round
         self.game_pointer = self.round.proceed_round(self.players, action)
