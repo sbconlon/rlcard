@@ -342,7 +342,7 @@ class TerminalNode(CFRNode):
         #
         # Remember the actual hands for each player
         #
-        # NOTE 1 - do we care about storing their real hands in this node?
+        # NOTE 1 - Do we care about storing their real hands in this node?
         #          for the time being, we will insist that each node stores an accurate,
         #          full game state representation, even if this is not neccessary for this node.
         #
@@ -791,6 +791,9 @@ class DecisionNode(CFRNode):
     # Add a node to this node's subtree
     #
     # Return true if successful, false otherwise
+    #
+    # NOTE - we need to use a mixed strategy here using PUCT statistics.
+    #        See SOG paper, page 15.
     #
     def grow_tree(self, hands : list[list[int]]) -> bool:
         #

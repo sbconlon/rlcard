@@ -143,7 +143,7 @@ class CounterfactualValueNetwork:
         #
         # Values output, (num_players, 1326)
         #
-        # NOTE - 'linear' is a place holder, what activation do we actually want?
+        # NOTE - Is there a better activation than 'linear'?
         #
         values_output = Dense(num_players * 1326, activation='linear')(layer)
         values_output = tf.keras.layers.Reshape((num_players, 1326))(values_output)

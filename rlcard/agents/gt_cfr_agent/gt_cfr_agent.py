@@ -31,21 +31,18 @@ class GTCFRSolver():
         # NOTE - right now the cfvn is automatically initialized with default params
         #
         self.cfvn = CounterfactualValueNetwork() if input_cfvn is None else input_cfvn
-        
         #
         # Probability of fully solving a given cfvn query
         # encountered during GT-CFR solving.
         #
         assert 0 < prob_query_solve <= 1, "Invalid solve query probability"
         self.prob_query_solve = prob_query_solve
-        
         #
         # Number of expansion simulations per gt-cfr run
         #
         # Note 1: Sometimes refered to as the 's' parameter in the literature
         #
         self.n_expansions = 10
-
         #
         # Ratio of tree expansion per cfr regret updates
         # Fractional - 0.01 = 100 regret updates per tree expansion
@@ -55,13 +52,23 @@ class GTCFRSolver():
         # Note 2: Sometimes refered to as the 'c' paramter in the literature
         #
         self.n_expansions_per_regret_updates = 0.01
-
         #
         # Root of the game tree
         #
         # Set to None upon class initialization.
         #
         self.root = None
+        #
+        # Decision point
+        #
+        # The decision point is the decision node in the game tree from which 
+        # we sample an action after solving. This is always a descendant of the 
+        # root node, and the end point of the trajectory seed.
+        #
+        # The trajectory seed directs the game tree growth toward the decision node 
+        #
+        self.trajectory_seed = None
+        self.decision_point = None
 
     #
     # Initialize the gadget game
@@ -139,9 +146,9 @@ class GTCFRSolver():
     #
     # NOTE - How does the gadget game change in the >2 player game setting. 
     #
-    def init_gadget_game(self, opponents_values :np.ndarray =None):
-        if opponents_values:
-            self.terminate_values = opponent_values
+    def init_gadget_game(self, input_game: NolimitholdemGame, input_opponents_values: np.ndarray =None):
+        if input_opponents_values:
+            self.terminate_values = input_opponents_values
         else:
             """TODO - impliment this part - currently a place filler"""
             self.terminate_values = np.zeros((52, 52)) # = t_values = v_2 in the literature
@@ -176,75 +183,169 @@ class GTCFRSolver():
     # trajectory_seed - list of actions, add the game states associated with the
     #                   chain of actions to the game tree before starting
     #
+    # Resolving requires two additional inputs:
+    #
+    #     1. The player's range
+    #     
+    #     2. The opponent's values
+    #
+    # Solving can be initialized with three different sets of information:
+    #
+    #   Case 1 - No information
+    #      (self.root=None, opponent_values=None, player_range=None, trajectory_seed=None)
+    #
+    #        - Opponent's range is estimated using a heuristic
+    #
+    #        - Player's range is assumed to be uniform across all possible hand combinations
+    #
+    #        - self.root is initialized at the given game state
+    #
+    #        * This is used by gt_cfr_agent at the start of an episode
+    #
+    #   Case 2 - Evaluated game tree from a previous solve call
+    #      (self.root=DecisionNode(...), opponent_values=None, player_range=None, trajectory_seed=None)
+    #
+    #        - Search the existing game tree for the input game state
+    #
+    #        - If the input game state is found, 
+    #          then set it to be the new root node of the game tree.
+    #
+    #        - If the input game state is not found,
+    #          then set the closest leaf node of the game tree to be the new root node.
+    #          Add the input game state to the initial game tree.
+    #
+    #        * This is used by successive gt_cfr_agent calls during an episode
+    #
+    #   Case 3 - Empty game tree. Given opponent values, player range, and action seeds.
+    #      (self.root=None, opponent_values=np.array(...), player_range=np.array(...), trajectory_seed=[...])
+    #
+    #        - Initialize the root node with the input opponent values and player range
+    #
+    #        - Add the nodes to the game tree corresponding to the game states along the given trajectory seed
+    #
+    #        * This is used by the CFVN during training
+    #
     def init_game_tree(self, input_game: NolimitholdemGame,
                              input_opponent_values: np.ndarray =None,
                              input_player_range: np.ndarray =None,
                              trajectory_seed: list[int] =None) -> None:
         #
-        # If we are not given input opponent values or the player's range,
-        # then search the game tree (if one exists) for the input game state
+        # Case 1 - No starting information
         #
-        if input_opponent_values is None or input_player_range is None:
-            # Store the acting player's id
+        if all(x is None for x in (self.root, input_opponent_values, input_player_range, trajectory_seed)):
+            #
+            # Assume the decision player's range at the root state is
+            # distributed uniformly over possible hands.
+            #
+            # The opponent players' ranges are randomized during node initialization.
+            #
+            player_range = np.triu(np.ones((52, 52)), k=1, dtype=np.float64)
+            for card in input_game.public_cards:
+                player_range[card.to_int():] = 0.
+                player_range[:card.to_int()] = 0.
+            player_range /= player_range.sum()
+            #
+            # Initialize the root node of the public game tree
+            #
+            self.root = DecisionNode(copy.deepcopy(input_game), player_range)
+            #
+            # Initialize the gadget game
+            #
+            self.init_gadget_game(input_game)
+            #
+            # The root node is the decision node we are solving
+            #
+            self.trajectory_seed = []
+        #
+        # Case 2 - Existing game tree. No input player range or opponent values.
+        #
+        elif self.root is not None and all(x is None for x in (input_opponent_values, input_player_range, trajectory_seed)):
+            #
+            # Search the game tree for the input game state
+            #
             pid = input_game.game_pointer
-            # Sanity check
-            if input_opponent_values != input_player_range:
-                raise ValueError("Both opponent values and player ranges should be None")
-            # Search
-            result = self.node_search(input_game)
+            result = self.node_search(pid, input_game)
+            assert result is not None, "Input game not found in the existing game tree"
             #
-            # Success case - Search found a node
+            # Make this the new root node
             #
-            if result is not None:
-                #
-                # Make this the new root node
-                #
-                self.root = result
-                #
-                # Take the opponent's values to be the gadget values
-                #
-                self.init_gadget_game(np.copy(self.root.))
-
+            self.root = result
+            #
+            # Take the opponent's values to be the gadget values
+            #
+            # Note: the player's range is already stored in the root node.
+            #
+            # NOTE - For now, the gadget game is only defined for a 2 player game.
+            #
+            self.init_gadget_game(input_game, opponents_values=np.copy(self.root.values[(pid+1) % 2]))
+            #
+            # Reset values to zero for the players
+            #
+            self.root.zero_values()
+            #
+            # If the trajectory of root node differs from the
+            # input game state, then store the difference as the trajectory seed.
+            #
+            assert len(input_game.trajectory) >= len(self.root.game.trajectory)
+            self.trajectory_seed = input_game.trajectory[len(result.game.trajectory):]
         #
-        # If the player's range is not given, then
-        # compute the decision player's range at the root state
+        # Case 3 - Empty game tree. Input range and values.
         #
-        #     Case 1: This is the start of the game. The player's
-        #     range is the probability of being dealt each hand comination.
+        elif self.root is None and all(x is not None for x in (input_player_range, input_opponent_values)):
+            #
+            # Initialize the root node with the player's values
+            #
+            self.root = DecisionNode(copy.deepcopy(input_game), np.copy(input_player_range))
+            #
+            # Initialize the gadget game with the opponent's values
+            #
+            self.init_gadget_game(input_game, opponents_values=input_opponent_values)
+            #
+            # Set the trajectory seed
+            #
+            self.trajectory_seed = trajectory_seed if trajectory_seed is not None else []
         #
-        #     Case 2: This is not the start of the game. Use the player's range from the
-        #     previous CFR run.
+        # Error case - Unrecognized initialization input configuration
         #
-        # The opponent players' ranges can be randomized.
-        #
-        if input_player_range:
-            player_range = input_player_range
         else:
-            """TODO - impliment this part"""
-            player_range = np.zeros((input_game.num_players, 52, 52)) # NOTE - PLACE FILLER
-            """"""
-        #
-        # Initialize the player's CFR values to zero.
-        #
-        player_values = np.zeros((input_game.num_players, 52, 52))
-        #
-        # Initialize the root node of the public game tree
-        #
-        self.root = DecisionNode(True, copy.deepcopy(input_game), player_ranges, player_values)
+            raise ValueError("Input values for initialization not recognized")        
         #
         # Save the player's id in the game tree
         #
-        CFRNode.set_root_pid = input_game.game_pointer
+        CFRNode.set_root_pid = pid
         #
         # Store a reference to the CVFN in the game tree
         #
-        self.root.set_cvfn(self.cfvn)
+        CFRNode.set_cvfn(self.cfvn)
         #
-        # Activate the root node and its children
+        # Activate the root node
         #
-        self.root.activate()
-        for child in self.root.children:
-            child.activate()
+        if not self.root.is_active:
+            self.root.activate()
+        #
+        # Activate the nodes along the seed trajectory,
+        # if a seed trajectory is given.
+        #
+        if self.trajectory_seed:
+            node = self.root
+            for i in self.trajectory_seed:
+                if not node.is_active:
+                    node.activate()
+                if isinstance(node, DecisionNode):
+                    node = node.children[self.trajectory_seed[i]]
+                elif isinstance(node, ChanceNode):
+                    node = node.outcomes[self.trajectory_seed[i]]
+                else:
+                    raise ValueError("Terminal node should not be encountered on a seed trajectory")
+            self.decision_point = node
+        #
+        # Otherwise, activate the root node's children
+        #
+        else:
+            for child in self.root.children:
+                if not child.is_active:
+                    child.activate()
+            self.decision_point = self.root
 
     #
     # Update the regrets in the gadget game
@@ -350,11 +451,11 @@ class GTCFRSolver():
         #
         # For each player...
         #
-        for pid in range(self.root.game.num_players):
+        for pid in range(self.decision_point.game.num_players):
             #
             # Flatten the player's range to make sampling easier
             #
-            hand_probs = self.root.player_ranges[pid].flatten()
+            hand_probs = self.decision_point.player_ranges[pid].flatten()
             #
             # Mask out cards that have already been taken
             #
@@ -390,7 +491,7 @@ class GTCFRSolver():
         #
         max_attempts = 10
         attempts = 0
-        while not self.root.grow_tree(hands) and attempts < max_attempts:
+        while not decision_point.grow_tree(hands) and attempts < max_attempts:
             attempts += 1
     
     #
@@ -437,47 +538,7 @@ class GTCFRSolver():
     #
     # Return a policy and value estimate for the given game state using gt-cfr
     #
-    # Resolving requires two additional inputs:
-    #
-    #     1. The player's range
-    #     
-    #     2. The opponent's values
-    #
-    # Solve can be called with three different sets of information:
-    #
-    #   1. No information
-    #      (self.root=None, opponent_values=None, player_range=None, trajectory_seed=None)
-    #
-    #        - Opponent's range is estimated using a heuristic
-    #
-    #        - Player's range is assumed to be uniform across all possible hand combinations
-    #
-    #        - self.root is initialized at the given game state
-    #
-    #        * This is used by gt_cfr_agent at the start of an episode
-    #
-    #   2. Evaluated game tree from a previous solve call
-    #      (self.root=DecisionNode(...), opponent_values=None, player_range=None, trajectory_seed=None)
-    #
-    #        - Search the existing game tree for the input game state
-    #
-    #        - If the input game state is found, 
-    #          then set it to be the new root node of the game tree.
-    #
-    #        - If the input game state is not found,
-    #          then set the closest leaf node of the game tree to be the new root node.
-    #          Add the input game state to the initial game tree.
-    #
-    #        * This is used by successive gt_cfr_agent calls during an episode
-    #
-    #   3. Empty game tree. Given opponent values, player range, and action seeds.
-    #      (self.root=None, opponent_values=np.array(...), player_range=np.array(...), trajectory_seed=[...])
-    #
-    #        - Initialize the root node with the input opponent values and player range
-    #
-    #        - Add the nodes to the game tree corresponding to the game states along the given trajectory seed
-    #
-    #        * This is used by the CFVN during training
+    
     #
     def solve(self, game: NolimitholdemGame, 
                     input_opponent_values: np.ndarray = None,
@@ -494,7 +555,7 @@ class GTCFRSolver():
         #
         # Return the computed strategies and values for the root node
         #
-        return np.copy(self.root.strategy), np.copy(self.root.values)
+        return np.copy(self.decision_point.strategy), np.copy(self.decision_point.values)
 
 #
 # This function handles the self-play loop that uses the GT-CFR solver 
