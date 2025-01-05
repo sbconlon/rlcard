@@ -98,6 +98,11 @@ class CFRNode(ABC):
     #                                   - to use knowledge of the game dynamics
     #                                     when adding a new node to the tree
     #
+    #        A3: I think the minimal representation of a game state is its trajectory.
+    #            If we have the trajectory then we can play forward the chance outcomes
+    #            and the moves from the starting state until we reconstruct the given 
+    #            game state.
+    #
     #
     # *IMPORTANT* - It's the caller's responsibility to ensure that this is always
     #               a deep copy to prevent other nodes from modifying this node's game 
@@ -828,8 +833,7 @@ class DecisionNode(CFRNode):
     # to the given trajectory.
     #
     # If the game state is not found, then return the nearest
-    # DecisionNode ancestor in the tree where pid is making
-    # the action.
+    # node in the game tree.
     #
     # pid - the acting player's at at the target game state.
     #
@@ -841,9 +845,13 @@ class DecisionNode(CFRNode):
     #       If two states have the same trajectores,
     #       then they are identical.
     #
-    def search(self, pid: int, trajectory: list[int]) -> DecisionNode:
+    def search(self, trajectory: list[int]) -> DecisionNode:
         #
-        # Get the search trajectory in the game tree
+        # Search should only be conducted on active nodes.
+        #
+        assert self.is_active, "Search attempt on a non-active node"
+        #
+        # Get the depth of this node in the full game tree
         #
         n = len(self.game.trajectory) # Number of moves from the start of the game 
                                       # to reach this node's game state
@@ -858,8 +866,8 @@ class DecisionNode(CFRNode):
         #
         # Initialize search variables
         #
-        path = [] # path in the game tree from this node toward the target node
         node = self
+        prev_node = None
         depth = n
         #
         # Traverse down the game tree as far as possible
@@ -876,7 +884,7 @@ class DecisionNode(CFRNode):
             #
             # Continue searching
             #
-            path.append(node)
+            prev_node = node
             if isinstance(node, DecisionNode):
                 node = node.children[trajectory[depth]]
             else:
@@ -887,10 +895,8 @@ class DecisionNode(CFRNode):
         #                  the node, traverse back up the search path looking for a
         #                  DecisionNode owned by the player pid.
         #
-        while path:
-            node = path.pop()
-            if isinstance(node, DecisionNode) and node.game.game_pointer == pid:
-                return node
+        if isinstance(prev_node, DecisionNode) or isinstance(prev_node, ChanceNode):
+            return prev_node
         #
         # Error case - We could not find an exact match or an ancestor match.
         #

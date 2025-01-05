@@ -263,8 +263,7 @@ class GTCFRSolver():
             #
             # Search the game tree for the input game state
             #
-            pid = input_game.game_pointer
-            result = self.node_search(pid, input_game)
+            result = self.node_search(input_game)
             assert result is not None, "Input game not found in the existing game tree"
             #
             # Make this the new root node
@@ -277,6 +276,7 @@ class GTCFRSolver():
             #
             # NOTE - For now, the gadget game is only defined for a 2 player game.
             #
+            pid = input_game.game_pointer
             self.init_gadget_game(input_game, opponents_values=np.copy(self.root.values[(pid+1) % 2]))
             #
             # Reset values to zero for the players
