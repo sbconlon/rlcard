@@ -75,16 +75,18 @@ def starting_hand_values(game: NolimitholdemGame) -> np.ndarray:
 # Estimate the starting hand values by simulating the game
 # N times, collecting the average return from each hand.
 #
-def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.ndarray:
+def compute_starting_hand_values(game: NolimitholdemGame, N: int = 1000) -> np.ndarray:
     #
     # Accumulate the total value collected by each hand,
     # initialized to zero.
     #
     values_sum = np.zeros((52, 52))
+    update_count = 0
     #
     # Run N simulations
     #
-    for _ in range(N):
+    for i in range(N):
+        print(i)
         #
         # Simulate the game to an endpoint
         #
@@ -113,20 +115,22 @@ def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.
         #     permulations(..., num_player) 
         #         = list of all possible hand assignments to each player
         #
-        hands_list = list(combinations(possible_cards, 2))
-        weight = 1 / len(hands_list)
-        for hands in permutations(hands_list, sim_game.num_players):
+        for hands in permutations(combinations(possible_cards, 2), sim_game.num_players):
             #
-            # Filter hand combinations that share cards
+            # Filter hand combinations that have overlapping cards
             #
             if not set(hands[0]).isdisjoint(set(hands[1])):
                 continue
-            import ipdb; ipdb.set_trace()
+            print([(str(hand[0]), str(hand[1])) for hand in hands])
+            #
+            # Update the normalization factor
+            #
+            update_count += 1
             #
             # Assign the hypothetical hands to each player in the game instance
             #
             for pid, hand in enumerate(hands):
-                sim_game.players[pid].hand = hand
+                sim_game.players[pid].hand = list(hand)
             #
             # Compute the payoffs for this hand configuration 
             # in this node's game state
@@ -141,11 +145,12 @@ def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.
             # Note: We use Player 1's payoffs here, but it doesn't matter
             #       which player's payoffs we use.
             #
-            values_sum[hands[0][0].to_int(), hands[0][1].to_int()] += weight * hand_payoffs[0]
+            values_sum[hands[0][0].to_int(), hands[0][1].to_int()] +=  hand_payoffs[0]
     #
     # Divide by the number of simulations to get the average
     # payoff for the hands in the simulated games.
     #
-    return values_sum / N
+    import ipdb; ipdb.set_trace()
+    return values_sum / update_count
 
 
