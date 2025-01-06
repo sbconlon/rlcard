@@ -1,3 +1,5 @@
+from __future__ import annotations  # Enables forward references
+
 # ========================================================================= #
 #                                                                           #
 #  This file defines the three node types for the game tree:                #
