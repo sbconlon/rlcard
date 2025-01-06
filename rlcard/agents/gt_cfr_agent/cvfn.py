@@ -1,3 +1,5 @@
+from __future__ import annotations  # Enables forward references
+
 # ========================================================================= #
 #                                                                           #
 # This file defines the Counterfactual Value Network (CVFN)                 #
@@ -26,7 +28,6 @@
 # ========================================================================= #
 
 # External imports
-from __future__ import annotations  # Enables forward references
 from multiprocessing import Process, Queue
 import numpy as np
 import tensorflow as tf

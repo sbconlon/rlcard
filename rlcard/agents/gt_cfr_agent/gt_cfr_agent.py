@@ -1,6 +1,7 @@
+from __future__ import annotations  # Enables forward references
+
 # External imports
 import copy
-from __future__ import annotations  # Enables forward references
 import math
 import numpy as np
 import random
