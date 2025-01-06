@@ -585,6 +585,23 @@ class DecisionNode(CFRNode):
         regret_sum = np.sum(regret_pos, axis=0, keepdims=True) # sum along actions axis, (1, 52, 52) array
         regret_sum[regret_sum == 0] = 1 # avoid dividing by zero
         self.strategy = regret_pos / regret_sum
+    
+    #
+    # Estimate this node's values using the cfvn
+    #
+    def update_values_w_cfvn(self):
+        #
+        # The cfvn should only be used on inactive nodes
+        #
+        assert not self.is_active, "CFVN should not be used on active nodes"
+        #
+        # Convert the node's information into an input vector for the cvfn
+        #
+        input = DecisionNode.get_cvfn().to_vect(self.game, self.player_ranges, False)
+        #
+        # Query the network
+        #
+        self.values, self.strategy = DecisionNode.get_cvfn().query(input)
 
     #
     # Perform a CFR value and strategy update
@@ -594,21 +611,8 @@ class DecisionNode(CFRNode):
     def update_values(self) -> list[tuple[np.ndarry]]:
         #
         # If this node is not active, 
-        # then estimate its values using the cfvn. 
         #
-        if not self.is_active:
-            #
-            # Convert the nodes information into an input vector for the cvfn
-            #
-            input = DecisionNode.get_cvfn().to_vect(self.game, self.player_ranges, False)
-            #
-            # Query the network
-            #
-            self.values, self.strategy = DecisionNode.get_cvfn().query(input)
-            #
-            # Package the input/output of the network into a query tuple
-            #
-            return [(input, np.copy(self.values), np.copy(self.strategy))]
+        assert self.is_active, "Value update attempted on an inactive node in the game tree"
         #
         # Else, the node is active in the game tree and we
         # need to perform a full value update with recursion.
@@ -618,6 +622,16 @@ class DecisionNode(CFRNode):
         # Note: game_pointer holds the player id of the player making the decision
         #
         pid = self.game.game_pointer
+        #
+        # Store copies of the opponent values and player range before the start
+        # of the value update.
+        #
+        # This is needed for constructing query information.
+        #
+        # NOTE - For now, this assumes a 2 player game
+        #
+        opponent_values = np.copy(self.values[(pid + 1) % 2])
+        player_range = np.copy(self.player_ranges[pid])
         #
         # Initialize the player's values to zero
         #
@@ -659,7 +673,30 @@ class DecisionNode(CFRNode):
             #
             # Compute the value of the child node
             #
-            querries.append(child.update_values())
+            if child.is_active:
+                #
+                # Recurse down the game tree to compute the child's values
+                #
+                querries.append(child.update_values())
+            else:
+                #
+                # Use the CFVN to estimate the child's values
+                #
+                child.update_values_w_cfvn()
+                #
+                # Cache the information needed for potentially solving this query
+                #
+                # A query takes the form:
+                #   tuple(game state, opponent values, player range, trajectory seed)
+                #
+                # NOTE - For now, store the entire game object.
+                #        
+                #        This is a waste of memory.
+                #
+                #        In the future, we should only store the information
+                #        needed to reconstruct the game state.
+                #
+                querries.append((self.game, opponent_values, player_range, [action]))
             #
             # Use the child's values to update the parent's values
             #
@@ -699,7 +736,7 @@ class DecisionNode(CFRNode):
     #
     # Note: Terminal nodes are always actived.
     #
-    def add_child(self, action : int) -> None: #NOTE
+    def add_child(self, action : int) -> None:
         #
         # Validate the given action
         #

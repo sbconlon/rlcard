@@ -260,24 +260,13 @@ class CounterfactualValueNetwork:
                 #
                 query = self.query_queue.get(block=True)
                 #
-                # Convert the input vector back to the game object
-                # and player ranges that produced it.
-                #
-                # NOTE - Should we just store this information in the query tuple?
-                #        Either we use memory to store it or compute to recover it.
-                #
-                game, player_ranges = self.from_vect(query[0])
-                #
                 # Solve the query
                 #
-                # NOTE - Should we use the opponent player's value estimate from the querry
-                #        as the solver's terminate gadget value?
-                #
-                target_strat, target_values = self.solvers[worker_id].solve(game, player_ranges)
+                target_strat, target_values = self.solvers[worker_id].solve(*query)
                 #
                 # Place the solved query on the replay buffer
                 #
-                self.replay_buffer.put((query[0], target_strat, target_values))
+                self.replay_buffer.put((query[0].to_vect(), target_strat, target_values))
             
             #
             # Output the worker error to the console
