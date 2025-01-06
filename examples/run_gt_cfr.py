@@ -2,9 +2,15 @@
 #  Train a GT-CFR Agent  #
 # ====================== #
 
+# External imports
+import ipdb
+
 # Internal imports
 import rlcard
 from rlcard.agents.gt_cfr_agent import GTCFRAgent
+
+# NOTE - step through the start of the training squence line-by-line
+ipdb.set_trace()
 
 #
 # Training parameters
@@ -32,5 +38,8 @@ env = rlcard.make('no-limit-holdem', config=config)
 #
 agent = GTCFRAgent(env)
 
+#
+# Run self-play training episodes
+#
 for episode in range(num_episodes):
     agent.self_play()
