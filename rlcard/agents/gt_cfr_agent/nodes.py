@@ -542,7 +542,7 @@ class DecisionNode(CFRNode):
         #
         # Represented as an upper triangular matrix with zeros along the diagonal.
         #
-        self.regrets  = np.zeros(len(self.actions), 52, 52)
+        self.regrets  = np.zeros((len(self.actions), 52, 52))
 
     #
     # Updates the player's regrets and strategies 

@@ -1,5 +1,6 @@
 # External imports
 import copy
+from itertools import combinations, permutations
 import numpy as np
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from rlcard.utils.utils import init_standard_deck
 #
 def uniform_range(public_cards : list[Card]) -> np.array:
     # Initialize all hand combos to 1
-    player_range = np.triu(np.ones((52, 52)), k=1, dtype=np.float64)
+    player_range = np.triu(np.ones((52, 52)), k=1)
     # Set the probability of holding a public card to zero
     for card in public_cards:
         player_range[card.to_int():] = 0.
@@ -112,9 +113,10 @@ def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.
         #     permulations(..., num_player) 
         #         = list of all possible hand assignments to each player
         #
-        hands_list = combinations(possible_cards, 2)
+        hands_list = list(combinations(possible_cards, 2))
         weight = 1 / len(hands_list)
-        for hands in permutations(hand_list, sim_game.num_players):
+        for hands in permutations(hands_list, sim_game.num_players):
+            import ipdb; ipdb.set_trace() #DEBUG
             #
             # Filter hand combinations that share cards
             #
