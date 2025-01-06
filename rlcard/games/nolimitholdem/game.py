@@ -205,7 +205,7 @@ class NolimitholdemGame(Game):
                 self.players[pid].hand = self.fixed_player_cards[pid]
             else:
                 # Else, deal a random hand
-                random_hand = [self.dealer.deal_card(), self.dealer.deal_card()]
+                random_hand = sorted([self.dealer.deal_card(), self.dealer.deal_card()], key=lambda x: x.to_int())
                 self.players[pid].hand = random_hand
             # Update the trajectory
             outcome_id = NolimitholdemGame.outcome_to_int(self.players[pid].hand)
