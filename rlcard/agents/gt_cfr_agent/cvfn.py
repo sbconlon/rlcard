@@ -233,7 +233,7 @@ class CounterfactualValueNetwork:
         # self.solvers[worker id]
         #   = GT-CFR solver object for the query solver with thread id = worker id
         #
-        self.solvers = [GTCFRSolver(input_cfvn=self, prob_query_solve=self.q_recursive) for _ in self.n_query_solvers]
+        self.solvers = [GTCFRSolver(input_cfvn=self, prob_query_solve=self.q_recursive) for _ in range(self.n_query_solvers)]
         #
         # Spawn the worker processes
         #
