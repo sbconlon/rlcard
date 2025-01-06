@@ -31,6 +31,9 @@ class GTCFRSolver():
     # the counterfactual value network.
     #
     def __init__(self, input_cfvn: CounterfactualValueNetwork =None, prob_query_solve: float =0.9):
+        # Import at runtime
+        from rlcard.agents.gt_cfr_agent.cvfn import CounterfactualValueNetwork
+        
         #
         # Initialize the counterfactual value model, if one is not given.
         #
