@@ -6,6 +6,7 @@ from pathlib import Path
 
 # Internal imports
 from rlcard.games.base import Card
+from rlcard.games.nolimitholdem import Dealer
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
 from rlcard.games.nolimitholdem.round import Action
 from rlcard.utils.utils import init_standard_deck
@@ -78,74 +79,47 @@ def starting_hand_values(game: NolimitholdemGame) -> np.ndarray:
 def compute_starting_hand_values(game: NolimitholdemGame, N: int = 1000) -> np.ndarray:
     #
     # Accumulate the total value collected by each hand,
-    # initialized to zero.
+    # initialized to zero. And the number of times
+    # the hand was sampled.
     #
-    values_sum = np.zeros((52, 52))
-    update_count = 0
+    acc_values = np.zeros((52, 52))
+    acc_visits = np.zeros((52, 52))
     #
     # Run N simulations
     #
-    for i in range(N):
-        print(i)
+    for _ in range(N):
+        #
+        # Create a copy of the given game to simulate
+        #
+        sim_game = copy.deepcopy(game)
+        #
+        # Deal two hypotetical hands to each player
+        #
+        sim_game.dealer = Dealer(sim_game.np_random)
+        for card in sim_game.public_cards:
+            sim_game.dealer.remove_card(card)
+        for player in sim_game.players:
+            player.hand = [sim_game.dealer.deal_card()]
         #
         # Simulate the game to an endpoint
         #
-        sim_game = copy.deepcopy(game)
         while not sim_game.is_over():
             #
             # Advance the game forward by always taking the CHECK/CALL action
             #
             sim_game.step(Action.CHECK_CALL)
         #
-        # NOTE - This code is largely taken from the ChanceNode.cache_payoffs() function.
-        #        We should probably seperate this out into a stand alone function
-        #        to maximize code reuse.
+        # Compute the payoffs for this hand configuration 
+        # in this node's game state
         #
-        # Get the set of possible cards 
-        # the players can have in their hands
+        hand_payoffs = sim_game.get_payoffs()
         #
-        possible_cards = [card for card in init_standard_deck() if card not in sim_game.public_cards]
+        # Update the accumulated values and visits
         #
-        # For each possible hand combination...
-        #
-        # Note -
-        #     combinations(possible_cards, 2) 
-        #         = list of all possible 2 card hands
-        #
-        #     permulations(..., num_player) 
-        #         = list of all possible hand assignments to each player
-        #
-        for hands in permutations(combinations(possible_cards, 2), sim_game.num_players):
-            #
-            # Filter hand combinations that have overlapping cards
-            #
-            if not set(hands[0]).isdisjoint(set(hands[1])):
-                continue
-            print([(str(hand[0]), str(hand[1])) for hand in hands])
-            #
-            # Update the normalization factor
-            #
-            update_count += 1
-            #
-            # Assign the hypothetical hands to each player in the game instance
-            #
-            for pid, hand in enumerate(hands):
-                sim_game.players[pid].hand = list(hand)
-            #
-            # Compute the payoffs for this hand configuration 
-            # in this node's game state
-            #
-            hand_payoffs = sim_game.get_payoffs()
-            #
-            # Update the accumulated values function.
-            #
-            # Weight this payout by the probability of the opponent 
-            # having their hand.
-            #
-            # Note: We use Player 1's payoffs here, but it doesn't matter
-            #       which player's payoffs we use.
-            #
-            values_sum[hands[0][0].to_int(), hands[0][1].to_int()] +=  hand_payoffs[0]
+        for pid, player in enumerate(sim_game.players):
+            card1, card2 = player.hand[0].to_int(), player.hand[1].to_int()
+            acc_values[card1, card2] +=  hand_payoffs[pid]
+            acc_visits[card1, card2] += 1
     #
     # Divide by the number of simulations to get the average
     # payoff for the hands in the simulated games.

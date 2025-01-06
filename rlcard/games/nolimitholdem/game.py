@@ -101,7 +101,7 @@ class NolimitholdemGame(Game):
         self.dealer_id = game_config['dealer_id']
     
     #
-    # Incode the chance outcome into a unique int identifier
+    # Encode the chance outcome into a unique int identifier
     #
     # Note: The outcome hashes are precomputed class members.
     #       The computation occurs when the class is imported,
@@ -121,7 +121,6 @@ class NolimitholdemGame(Game):
             return NolimitholdemGame.three_card_outcome_hash[card_ids]
         else:
             raise ValueError("Only expect outcomes of length 1, 2, or 3")
-        
 
     def deal_public_cards(self):
         if not self.dealer:
@@ -185,11 +184,8 @@ class NolimitholdemGame(Game):
         
         # Remove fixed cards from the deck
         for card in self.fixed_public_cards:
-            print(f'Removing {card}')
             self.dealer.remove_card(card)
         for hand in self.fixed_player_cards.values():
-            print(f'Removing {hand[0]}')
-            print(f'Removing {hand[1]}')
             self.dealer.remove_card(hand[0])
             self.dealer.remove_card(hand[1])
 
