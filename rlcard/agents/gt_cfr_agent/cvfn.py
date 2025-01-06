@@ -240,7 +240,7 @@ class CounterfactualValueNetwork:
         # Spawn the worker processes
         #
         for worker_id in range(self.n_query_solvers):
-            p = Process(target=self.query_solver_loop, args=(worker_id))
+            p = Process(target=self.query_solver_loop, args=(worker_id,))
     
     #
     # Loop for the query solver tasks
