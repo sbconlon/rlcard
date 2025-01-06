@@ -160,8 +160,8 @@ class GTCFRSolver():
             self.terminate_values = input_opponents_values
         else:
             self.terminate_values = starting_hand_values(input_game) # = t_values = v_2 in the literature
-        self.gadget_regrets = np.zeros(2, 52, 52) # 2 gadget actions, (Follow, Terminate)
-        self.gadget_values = np.zeros(52, 52)
+        self.gadget_regrets = np.zeros((2, 52, 52)) # 2 gadget actions, (Follow, Terminate)
+        self.gadget_values = np.zeros((52, 52))
     
     #
     # Search the game tree for the input game state,
@@ -315,7 +315,7 @@ class GTCFRSolver():
         #
         # Save the player's id in the game tree
         #
-        CFRNode.set_root_pid = pid
+        CFRNode.set_root_pid = input_game.game_pointer
         #
         # Store a reference to the CVFN in the game tree
         #

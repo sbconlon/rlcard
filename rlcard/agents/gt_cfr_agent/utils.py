@@ -24,8 +24,8 @@ def uniform_range(public_cards : list[Card]) -> np.array:
     player_range = np.triu(np.ones((52, 52)), k=1)
     # Set the probability of holding a public card to zero
     for card in public_cards:
-        player_range[card.to_int():] = 0.
-        player_range[:card.to_int()] = 0.
+        player_range[card.to_int(), :] = 0.
+        player_range[:, card.to_int()] = 0.
     # Normalize the distribution
     player_range /= player_range.sum()
     return player_range
@@ -125,7 +125,6 @@ def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.
     # Divide by the number of simulations to get the average
     # payoff for the hands in the simulated games.
     #
-    import ipdb; ipdb.set_trace()
     return np.where(acc_visits != 0, acc_values / acc_visits, 0)
 
 

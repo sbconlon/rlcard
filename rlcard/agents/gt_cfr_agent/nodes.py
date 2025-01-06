@@ -733,16 +733,13 @@ class DecisionNode(CFRNode):
     #
     # Add the child node associated with the given action.
     #
-    # NOTE !!! - Are we sure the action needs to be an integer?
-    # action - int, action that leads to the child node to be added.
-    #
     # Note: Terminal nodes are always actived.
     #
-    def add_child(self, action : int) -> None:
+    def add_child(self, action : Action) -> None:
         #
         # Validate the given action
         #
-        assert 0 <= action < len(self.actions), "Invalid action index"
+        assert action in self.children.keys(), "Invalid action index"
         assert self.children[action] is None, "Child already exists"
         #
         # Create a new game object for the new node
@@ -820,7 +817,7 @@ class DecisionNode(CFRNode):
         # of a non-active node before activating it.
         #
         assert not self.is_active, "This node is already active"
-        assert all(child is None for child in self.children), "Non-active nodes can't have children"
+        assert all(child is None for child in self.children.values()), "Non-active nodes can't have children"
         #
         # Set the activation flag to true
         #
