@@ -155,11 +155,12 @@ class NolimitholdemGame(Game):
         outcome += cards_from_fixed
         
         # Draw additional cards from the dealer if needed
-        remaining_needed = total - len(self.public_cards)
+        remaining_needed = total - len(self.public_cards) - len(outcome)
         outcome += [self.dealer.deal_card() for _ in range(remaining_needed)]
 
         # Update trajectory
-        self.trajectory.append(outcome)
+        if not cards_from_fixed:
+            self.trajectory.append(NolimitholdemGame.outcome_to_int(outcome))
 
         # Update public cards
         self.public_cards += outcome

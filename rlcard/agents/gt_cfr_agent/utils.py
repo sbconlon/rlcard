@@ -116,12 +116,12 @@ def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.
         hands_list = list(combinations(possible_cards, 2))
         weight = 1 / len(hands_list)
         for hands in permutations(hands_list, sim_game.num_players):
-            import ipdb; ipdb.set_trace() #DEBUG
             #
             # Filter hand combinations that share cards
             #
             if not set(hands[0]).isdisjoint(set(hands[1])):
                 continue
+            import ipdb; ipdb.set_trace()
             #
             # Assign the hypothetical hands to each player in the game instance
             #
@@ -131,7 +131,7 @@ def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.
             # Compute the payoffs for this hand configuration 
             # in this node's game state
             #
-            hand_payoffs = self.game.get_payoffs()
+            hand_payoffs = sim_game.get_payoffs()
             #
             # Update the accumulated values function.
             #
