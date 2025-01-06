@@ -26,17 +26,21 @@
 # ========================================================================= #
 
 # External imports
+from __future__ import annotations  # Enables forward references
 from multiprocessing import Process, Queue
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense, Input
+from typing import TYPE_CHECKING
 import time
 
 # Internal imports
 from rlcard.agents.gt_cfr_agent.fifo_buffer import FIFOBuffer
-from rlcard.agents.gt_cfr_agent.gt_cfr_agent import GTCFRSolver
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
+
+if TYPE_CHECKING:
+    from rlcard.agents.gt_cfr_agent.gt_cfr_agent import GTCFRSolver
 
 #
 # The goal of the Counterfactual Value Network is to estimate

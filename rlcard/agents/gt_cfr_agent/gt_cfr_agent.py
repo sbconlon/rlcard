@@ -1,15 +1,20 @@
 # External imports
 import copy
+from __future__ import annotations  # Enables forward references
 import math
 import numpy as np
 import random
+from typing import TYPE_CHECKING
 
 # Internal imports
-from rlcard.agents.gt_cfr_agent.cvfn import CounterfactualValueNetwork
 from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode
 from rlcard.agents.gt_cfr_agent.utils import uniform_range, starting_hand_values
 from rlcard.envs.nolimitholdem import NolimitholdemEnv
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
+
+# Avoid a circular import
+if TYPE_CHECKING:
+    from rlcard.agents.gt_cfr_agent.cvfn import CounterfactualValueNetwork # Only imports for type hints
 
 #
 # This class immplements the GT-CFR algorithm
