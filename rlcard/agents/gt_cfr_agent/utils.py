@@ -76,7 +76,7 @@ def starting_hand_values(game: NolimitholdemGame) -> np.ndarray:
 # Estimate the starting hand values by simulating the game
 # N times, collecting the average return from each hand.
 #
-def compute_starting_hand_values(game: NolimitholdemGame, N: int = 1000) -> np.ndarray:
+def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.ndarray:
     #
     # Accumulate the total value collected by each hand,
     # initialized to zero. And the number of times
@@ -95,11 +95,12 @@ def compute_starting_hand_values(game: NolimitholdemGame, N: int = 1000) -> np.n
         #
         # Deal two hypotetical hands to each player
         #
+        sim_game.np_random = np.random.RandomState()
         sim_game.dealer = Dealer(sim_game.np_random)
         for card in sim_game.public_cards:
             sim_game.dealer.remove_card(card)
         for player in sim_game.players:
-            player.hand = [sim_game.dealer.deal_card()]
+            player.hand = [sim_game.dealer.deal_card(), sim_game.dealer.deal_card()]
         #
         # Simulate the game to an endpoint
         #
@@ -117,14 +118,14 @@ def compute_starting_hand_values(game: NolimitholdemGame, N: int = 1000) -> np.n
         # Update the accumulated values and visits
         #
         for pid, player in enumerate(sim_game.players):
-            card1, card2 = player.hand[0].to_int(), player.hand[1].to_int()
-            acc_values[card1, card2] +=  hand_payoffs[pid]
+            card1, card2 = sorted((player.hand[0].to_int(), player.hand[1].to_int()))
+            acc_values[card1, card2] +=  hand_payoffs[pid] / sim_game.dealer.pot
             acc_visits[card1, card2] += 1
     #
     # Divide by the number of simulations to get the average
     # payoff for the hands in the simulated games.
     #
     import ipdb; ipdb.set_trace()
-    return values_sum / update_count
+    return np.where(acc_visits != 0, acc_values / acc_visits, 0)
 
 
