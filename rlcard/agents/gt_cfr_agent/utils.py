@@ -74,7 +74,7 @@ def starting_hand_values(game: NolimitholdemGame) -> np.ndarray:
 # Estimate the starting hand values by simulating the game
 # N times, collecting the average return from each hand.
 #
-def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.ndarry:
+def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.ndarray:
     #
     # Accumulate the total value collected by each hand,
     # initialized to zero.
