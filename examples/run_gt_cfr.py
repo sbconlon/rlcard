@@ -10,9 +10,6 @@ import rlcard
 from rlcard.agents.gt_cfr_agent.gt_cfr_agent import GTCFRAgent
 from rlcard.games.base import Card
 
-# NOTE - step through the start of the training squence line-by-line
-ipdb.set_trace()
-
 #
 # Training parameters
 #
