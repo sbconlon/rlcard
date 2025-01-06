@@ -112,7 +112,7 @@ class NolimitholdemGame(Game):
     three_card_outcome_hash = { combo: idx for idx, combo in enumerate(combinations(range(52), 3)) }
     
     def outcome_to_int(outcome: list[Card]) -> int:
-        card_ids = [card.to_int() for card in outcome]
+        card_ids = (card.to_int() for card in outcome)
         if len(card_ids) == 1:
             return NolimitholdemGame.one_card_outcome_hash[card_ids]
         elif len(card_ids) == 2:
