@@ -202,14 +202,14 @@ class NolimitholdemGame(Game):
         for pid in range(self.num_players):
             if pid in self.fixed_player_cards:
                 # Update trajectory
-                self.trajectory.append(self.fixed_player_cards[pid])
+                self.trajectory.append(outcome_to_int(self.fixed_player_cards[pid]))
                 # Give the player their rigged hand
                 self.players[pid].hand = self.fixed_player_cards[pid]
             else:
                 # Else, deal a random hand
                 random_hand = [self.dealer.deal_card(), self.dealer.deal_card()]
                 # Update trajectory
-                self.trajectory.append(random_hand)
+                self.trajectory.append(outcome_to_int(random_hand))
                 # Give the player their random hand
                 self.players[pid].hand = random_hand
 
