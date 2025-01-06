@@ -212,6 +212,8 @@ class CounterfactualValueNetwork:
     # Initialize the process pool for query solvers.
     #
     def init_query_solvers(self) -> None:
+        # Runtime import
+        from rlcard.agents.gt_cfr_agent.gt_cfr_agent import GTCFRSolver
         #
         # If the class constructor was called with 0 workers set,
         # then we disable asynchronous query solving.
