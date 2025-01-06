@@ -7,7 +7,7 @@ import random
 # Internal imports
 from rlcard.agents.gt_cfr_agent.cvfn import CounterfactualValueNetwork
 from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode
-#from rlcard.agents.gt_cfr_agent.utils import rand_value, initial_hand_values
+from rlcard.agents.gt_cfr_agent.utils import uniform_range, starting_hand_values
 from rlcard.envs.nolimitholdem import NolimitholdemEnv
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
 
@@ -150,9 +150,7 @@ class GTCFRSolver():
         if input_opponents_values:
             self.terminate_values = input_opponents_values
         else:
-            """TODO - impliment this part - currently a place filler"""
-            self.terminate_values = np.zeros((52, 52)) # = t_values = v_2 in the literature
-            ''''''
+            self.terminate_values = starting_hand_values(input_game) # = t_values = v_2 in the literature
         self.gadget_regrets = np.zeros(2, 52, 52) # 2 gadget actions, (Follow, Terminate)
         self.gadget_values = np.zeros(52, 52)
     
@@ -239,11 +237,7 @@ class GTCFRSolver():
             #
             # The opponent players' ranges are randomized during node initialization.
             #
-            player_range = np.triu(np.ones((52, 52)), k=1, dtype=np.float64)
-            for card in input_game.public_cards:
-                player_range[card.to_int():] = 0.
-                player_range[:card.to_int()] = 0.
-            player_range /= player_range.sum()
+            player_range = uniform_range(input_game.public_cards)
             #
             # Initialize the root node of the public game tree
             #
@@ -537,8 +531,6 @@ class GTCFRSolver():
 
     #
     # Return a policy and value estimate for the given game state using gt-cfr
-    #
-    
     #
     def solve(self, game: NolimitholdemGame, 
                     input_opponent_values: np.ndarray = None,
