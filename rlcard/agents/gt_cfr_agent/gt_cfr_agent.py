@@ -597,7 +597,7 @@ class GTCFRAgent():
     
     #
     # Play through one hand of poker using gt-cfr to estimate
-    # policies and values. Add to reply buffer.
+    # policies and values.
     #
     def self_play(self):
         #
