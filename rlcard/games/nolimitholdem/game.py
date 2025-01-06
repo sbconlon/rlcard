@@ -114,11 +114,11 @@ class NolimitholdemGame(Game):
     def outcome_to_int(outcome: list[Card]) -> int:
         card_ids = [card.to_int() for card in outcome]
         if len(card_ids) == 1:
-            return one_card_outcome_hash[card_ids]
+            return NolimitholdemGame.one_card_outcome_hash[card_ids]
         elif len(card_ids) == 2:
-            return two_card_outcome_hash[card_ids]
+            return NolimitholdemGame.two_card_outcome_hash[card_ids]
         elif len(card_ids) == 3:
-            return three_card_outcome_hash[card_ids]
+            return NolimitholdemGame.three_card_outcome_hash[card_ids]
         else:
             raise ValueError("Only expect outcomes of length 1, 2, or 3")
         
@@ -201,17 +201,15 @@ class NolimitholdemGame(Game):
         # Deal cards to each  player to prepare for the first round
         for pid in range(self.num_players):
             if pid in self.fixed_player_cards:
-                # Update trajectory
-                self.trajectory.append(outcome_to_int(self.fixed_player_cards[pid]))
                 # Give the player their rigged hand
                 self.players[pid].hand = self.fixed_player_cards[pid]
             else:
                 # Else, deal a random hand
                 random_hand = [self.dealer.deal_card(), self.dealer.deal_card()]
-                # Update trajectory
-                self.trajectory.append(outcome_to_int(random_hand))
-                # Give the player their random hand
                 self.players[pid].hand = random_hand
+            # Update the trajectory
+            outcome_id = NolimitholdemGame.outcome_to_int(self.players[pid].hand)
+            self.trajectory.append(outcome_id)
 
         # Initialize the starting stage of the game
         self.stage = self.starting_stage
