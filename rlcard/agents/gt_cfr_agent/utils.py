@@ -116,6 +116,11 @@ def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.
         weight = 1 / len(hands_list)
         for hands in permutations(hand_list, sim_game.num_players):
             #
+            # Filter hand combinations that share cards
+            #
+            if not set(hands[0]).isdisjoint(set(hands[1])):
+                continue
+            #
             # Assign the hypothetical hands to each player in the game instance
             #
             for pid, hand in enumerate(hands):
