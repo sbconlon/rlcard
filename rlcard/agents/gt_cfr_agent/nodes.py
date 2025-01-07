@@ -267,12 +267,12 @@ class TerminalNode(CFRNode):
         #        change depending on the overhead for computing
         #        payoff matrices.
         #
-        super().__init__(self, game, player_ranges)
+        super().__init__(game, player_ranges)
         self.is_active = True
         #
         # Poker games are terminated with showdowns
         #
-        assert(self.game.stage == Stage.SHOWDOWN) # NOTE - I think this is correct?
+        assert self.game.is_over() # TerminalNodes only represent completed game states
         #
         # Compute the payoff matrix for this node.
         #
@@ -359,8 +359,13 @@ class TerminalNode(CFRNode):
         # Initialize payoffs matrix to all zeros
         #
         shape = [self.game.num_players] + [52, 52]*self.game.num_players
-        self.payoffs = COO(shape, np.float64)
-        
+        self.payoffs = np.zeros(shape, dtype=np.float64)
+        #self.payoffs = COO(
+        #                   coords=np.empty((0, len(shape)), dtype=np.int64),  # No coordinates
+        #                   data=np.empty(0, dtype=np.float64),                # No values
+        #                   shape=shape
+        #)
+
         #
         # Get the set of possible cards 
         # the players can have in their hands
@@ -379,10 +384,18 @@ class TerminalNode(CFRNode):
         #
         for hands in permutations(combinations(possible_cards, 2), self.game.num_players):
             #
+            # Filter out hand combinations that share cards
+            #
+            # i.e. It is impossible for Player 1 and Player 2 to both
+            #      be holding the ace of spades.
+            #
+            if not set(hands[0]).isdisjoint(set(hands[1])):
+                continue
+            #
             # Assign the hypothetical hands to each player in the game instance
             #
             for pid, hand in enumerate(hands):
-                self.game.players[pid].hand = hand
+                self.game.players[pid].hand = list(hand)
             #
             # Compute the payoffs for this hand configuration 
             # in this node's game state
@@ -395,8 +408,8 @@ class TerminalNode(CFRNode):
             #
             # Set each player's payoffs in the matrix
             #
-            for pid in enumerate(hands):
-                self.payoffs[[pid] + card_idxs] = hand_payoffs[pid]
+            for pid in range(len(hands)):
+                self.payoffs[pid, *card_idxs] = hand_payoffs[pid]
         
         #
         # Restore the players' real hands in the game object
@@ -466,7 +479,6 @@ class TerminalNode(CFRNode):
 # This node represents a decision made by a player in the game.
 #
 class DecisionNode(CFRNode):
-
     #
     # Initialize a new, non-active, decision node
     #
@@ -568,7 +580,7 @@ class DecisionNode(CFRNode):
         # Note 3: KEY IDEA - we want to shift our strategy toward actions that perform better
         #                    than our current strategy.
         #
-        for action, child in enumerate(self.children):
+        for action_idx, child in enumerate(self.children.values()):
             #
             # Children of active nodes should be initialized already
             #
@@ -576,7 +588,7 @@ class DecisionNode(CFRNode):
             #
             # Perform the regret update for this node
             #
-            self.regrets[action] += child.values[pid] - self.values[pid]
+            self.regrets[action_idx] += child.values[pid] - self.values[pid]
         #
         # Update the acting player's strategy according to the new regrets
         #
@@ -644,7 +656,7 @@ class DecisionNode(CFRNode):
         #
         # For each child node...
         #
-        for action, child in enumerate(self.children):
+        for action, child in self.children.items():
             #
             # Verify the children are not null
             #
@@ -669,8 +681,9 @@ class DecisionNode(CFRNode):
             #
             # NOTE - be careful to assign by value here and not by reference
             #
+            action_idx = self.actions.index(action)
             child.player_ranges = np.copy(self.player_ranges)
-            child.player_ranges[pid] = self.strategy[action] * self.player_ranges[pid]
+            child.player_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
             #
             # Compute the value of the child node
             #
@@ -697,7 +710,7 @@ class DecisionNode(CFRNode):
                 #        In the future, we should only store the information
                 #        needed to reconstruct the game state.
                 #
-                querries.append((self.game, opponent_values, player_range, [action]))
+                querries.append((self.game, opponent_values, player_range, [action.value]))
             #
             # Use the child's values to update the parent's values
             #
@@ -707,7 +720,7 @@ class DecisionNode(CFRNode):
             # equal to the value of the child state weighted by the acting player's
             # probability of selecting the action
             #
-            self.values[pid] += self.strategy[action] * child.values[pid]
+            self.values[pid] += self.strategy[action_idx] * child.values[pid]
             #
             # For the non-acting players,
             #

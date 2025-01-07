@@ -140,6 +140,9 @@ class NolimitholdemRound:
         player = players[self.game_pointer]
 
         diff = max(self.raised) - self.raised[self.game_pointer]
+        # The player cant fold if theyre not facing a bet
+        if diff == 0:
+            full_actions.remove(Action.FOLD)
         # If the current player has no more chips after call, we cannot raise
         if diff > 0 and diff >= player.remained_chips:
             full_actions.remove(Action.RAISE_HALF_POT)

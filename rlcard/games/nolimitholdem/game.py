@@ -209,11 +209,10 @@ class NolimitholdemGame(Game):
             self.trajectory.append(outcome_id)
 
         # Initialize the starting stage of the game
-        self.stage = self.starting_stage
+        self.stage = Stage.PREFLOP
 
         # Initialize public cards
         self.public_cards = []
-        self.deal_public_cards()
         
         # Big blind and small blind
         s = (self.dealer_id + 1) % self.num_players
@@ -221,13 +220,8 @@ class NolimitholdemGame(Game):
         self.players[b].bet(chips=self.big_blind)
         self.players[s].bet(chips=self.small_blind)
 
-        # If the stage is PREFLOP, then
-        # the player next to the big blind plays first
-        if self.stage == Stage.PREFLOP:
-            self.game_pointer = (b + 1) % self.num_players
-        # Otherwise, the small blind starts
-        else:
-            self.game_pointer = s
+        # The player next to the big blind plays the first
+        self.game_pointer = (b + 1) % self.num_players
 
         # Initialize a bidding round, in the first round, the big blind and the small blind needs to
         # be passed to the round for processing.
@@ -240,6 +234,10 @@ class NolimitholdemGame(Game):
 
         # Save the history for stepping back to the last state.
         self.history = []
+
+        # Advance the game to the given fixed starting stage
+        while self.stage != self.starting_stage:
+            self.step(Action.CHECK_CALL)
 
         state = self.get_state(self.game_pointer)
 
@@ -287,7 +285,7 @@ class NolimitholdemGame(Game):
         #
         # Update the trajectory with the action id
         #
-        self.trajectory.append(list(Action).index(action))
+        self.trajectory.append(action.value)
 
         # Then we proceed to the next round
         self.game_pointer = self.round.proceed_round(self.players, action)

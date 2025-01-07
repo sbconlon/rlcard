@@ -553,6 +553,7 @@ class GTCFRSolver():
             # Run cfr to update the policy and regret estimates 
             # for each state in the tree
             #
+            import ipdb; ipdb.set_trace()
             self.cfr()
             #
             # Add a new state node to the game tree
@@ -591,7 +592,6 @@ class GTCFRSolver():
         #
         # Initialize the game tree for cfr
         #
-        import ipdb; ipdb.set_trace()
         self.init_game_tree(game, input_opponent_values, input_player_range, trajectory_seed)
         #
         # GT-CFR training run 
