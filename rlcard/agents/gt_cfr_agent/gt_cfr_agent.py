@@ -388,7 +388,7 @@ class GTCFRSolver():
         # Otherwise, activate the root node's children
         #
         else:
-            for child in self.root.children:
+            for child in self.root.children.values():
                 if not child.is_active:
                     child.activate()
             self.decision_point = self.root
@@ -591,6 +591,7 @@ class GTCFRSolver():
         #
         # Initialize the game tree for cfr
         #
+        import ipdb; ipdb.set_trace()
         self.init_game_tree(game, input_opponent_values, input_player_range, trajectory_seed)
         #
         # GT-CFR training run 

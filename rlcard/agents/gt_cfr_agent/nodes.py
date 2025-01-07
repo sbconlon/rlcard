@@ -267,7 +267,7 @@ class TerminalNode(CFRNode):
         #        change depending on the overhead for computing
         #        payoff matrices.
         #
-        super.__init__(self, game, player_ranges)
+        super().__init__(self, game, player_ranges)
         self.is_active = True
         #
         # Poker games are terminated with showdowns
@@ -471,7 +471,6 @@ class DecisionNode(CFRNode):
     # Initialize a new, non-active, decision node
     #
     def __init__(self, game : NolimitholdemGame, player_ranges : np.ndarray):
-        import ipdb; ipdb.set_trace()
         #
         # Start with the abstract class's initialization function
         #
@@ -733,13 +732,13 @@ class DecisionNode(CFRNode):
     #
     # Add the child node associated with the given action.
     #
-    # Note: Terminal nodes are always actived.
+    # Note: Terminal nodes are always activated.
     #
     def add_child(self, action : Action) -> None:
         #
         # Validate the given action
         #
-        assert action in self.children.keys(), "Invalid action index"
+        assert action in self.actions, "Invalid action index"
         assert self.children[action] is None, "Child already exists"
         #
         # Create a new game object for the new node
@@ -762,19 +761,23 @@ class DecisionNode(CFRNode):
         # NOTE - should this be made its own function, since the same
         #        operation is done in update_values()
         #
-        action_idx = list(self.children.keys()).index(action) # convert enum -> int
+        action_idx = self.actions.index(action) # convert enum -> int
         pid = self.game.game_pointer
         child_ranges = np.copy(self.player_ranges)
-        import ipdb; ipdb.set_trace()
         child_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
         #
-        # Case 1 - Child is a Chance Node 
+        # Case 1 - Child is a Terminal Node
+        #
+        if new_game.is_over():
+            child_node = TerminalNode(new_game, child_ranges)
+        #
+        # Case 2 - Child is a Chance Node 
         #
         # Check if the action caused a stage change
         #
         # NOTE: I'm not sure what the "END_HIDDEN" stage means?
         #
-        if (self.game.stage != new_game.stage and 
+        elif (self.game.stage != new_game.stage and 
             not new_game.stage in (Stage.END_HIDDEN, Stage.SHOWDOWN)):
             #
             # Note: the chance node initializer expects the given game state
@@ -782,12 +785,7 @@ class DecisionNode(CFRNode):
             #
             child_node = ChanceNode(copy.deepcopy(self.game), child_ranges)
         #
-        # Case 2 - Child is a Terminal Node
-        #
-        elif new_game.stage == Stage.SHOWDOWN:
-            child_node = TerminalNode(new_game, child_ranges)
-        #
-        # Case 3 - Child is a Decision Node
+        # Case 4 - Child is a Decision Node
         #
         # NOTE - doing the stage check to exlude 'END_HIDDEN'
         #
