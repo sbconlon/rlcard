@@ -12,16 +12,34 @@ from rlcard.games.nolimitholdem.round import Action
 from rlcard.utils.utils import init_standard_deck
 
 #
-# Uniform of the player holding a hand in the public state
+# Compute a uniform range over all possible hands,
+# given the publicly observable cards.
+#
+# range[i, j] = prob. the player is holding cards i and j.
 # 
 # This is represented as a 52x52 upper triangular matrix with the 
 # diagonal entries set to zero and the entire matrix is normalized.
 #
 # public_cards = list of indicies corresponding to publicly observed cards
 #
-def uniform_range(public_cards : list[Card]) -> np.array:
+def uniform_range(public_cards : list[Card]) -> np.ndarray:
     # Initialize all hand combos to 1
     player_range = np.triu(np.ones((52, 52)), k=1)
+    # Set the probability of holding a public card to zero
+    for card in public_cards:
+        player_range[card.to_int(), :] = 0.
+        player_range[:, card.to_int()] = 0.
+    # Normalize the distribution
+    player_range /= player_range.sum()
+    return player_range
+
+#
+# Compute a random range over all possible hands,
+# given the publicly observable cards.
+#
+def random_range(public_cards: list[Card]) -> np.ndarray:
+    # Initialize the range to random values
+    player_range = np.triu(np.random.rand(52, 52), k=1)
     # Set the probability of holding a public card to zero
     for card in public_cards:
         player_range[card.to_int(), :] = 0.

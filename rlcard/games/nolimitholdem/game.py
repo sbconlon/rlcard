@@ -287,7 +287,7 @@ class NolimitholdemGame(Game):
         #
         # Update the trajectory with the action id
         #
-        self.trajectory.append(self.get_legal_actions().index(action))
+        self.trajectory.append(list(Action).index(action))
 
         # Then we proceed to the next round
         self.game_pointer = self.round.proceed_round(self.players, action)

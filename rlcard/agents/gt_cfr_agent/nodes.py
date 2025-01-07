@@ -470,7 +470,8 @@ class DecisionNode(CFRNode):
     #
     # Initialize a new, non-active, decision node
     #
-    def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
+    def __init__(self, game : NolimitholdemGame, player_ranges : np.ndarray):
+        import ipdb; ipdb.set_trace()
         #
         # Start with the abstract class's initialization function
         #
@@ -526,9 +527,8 @@ class DecisionNode(CFRNode):
         # Set probabilities associated with hands containing public cards equal to zero
         #
         for card in self.game.public_cards:
-            for action in range(len(self.actions)):
-                self.strategy[action, card.to_int(), :] = 0.
-                self.strategy[action, :, card.to_int()] = 0.
+            self.strategy[:, card.to_int(), :] = 0.
+            self.strategy[:, :, card.to_int()] = 0.
 
         #
         # Normalize the stategy
@@ -751,8 +751,7 @@ class DecisionNode(CFRNode):
         # Apply the given action to the (copy of) the parent's game state
         # to get the child's game state
         #
-        action_str = new_game.get_legal_actions()[action]
-        new_game.step(action_str)
+        new_game.step(action)
         #
         # Build the child node
         #
@@ -763,9 +762,11 @@ class DecisionNode(CFRNode):
         # NOTE - should this be made its own function, since the same
         #        operation is done in update_values()
         #
+        action_idx = list(self.children.keys()).index(action) # convert enum -> int
         pid = self.game.game_pointer
         child_ranges = np.copy(self.player_ranges)
-        child_ranges[pid] = self.strategy[action] * self.player_ranges[pid]
+        import ipdb; ipdb.set_trace()
+        child_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
         #
         # Case 1 - Child is a Chance Node 
         #

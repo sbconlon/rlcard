@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 # Internal imports
 from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode
-from rlcard.agents.gt_cfr_agent.utils import uniform_range, starting_hand_values
+from rlcard.agents.gt_cfr_agent.utils import uniform_range, random_range, starting_hand_values
 from rlcard.envs.nolimitholdem import NolimitholdemEnv
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
 
@@ -179,6 +179,39 @@ class GTCFRSolver():
         return self.root.search(target_game.trajectory, target_game.game_pointer)
 
     #
+    # Given the acting player's range, assign randomized ranges
+    # to the opponent players.
+    #
+    def compute_initial_ranges(input_game, player_range):
+        #
+        # Allocate memory for the player ranges,
+        # initialized to zero.
+        #
+        nplayers = input_game.num_players
+        ranges = np.zeros((nplayers, 52, 52))
+        #
+        # For each player in the game...
+        #
+        for pid in range(nplayers):
+            #
+            # If this player is the acting player,
+            # then assign the input range to them.
+            #
+            if pid == input_game.game_pointer:
+                ranges[pid] = player_range
+            #
+            # Otherwise, the player is an opponent,
+            # assign them a random range.
+            #
+            # Note: opponent ranges at the root node
+            #       are set by the gadget game after the
+            #       first iteration of CFR
+            #
+            else:
+                ranges[pid] = random_range(input_game.public_cards)
+        return ranges
+
+    #
     # Initialize the starting game tree
     #
     # input_game - game state that was input for solving,
@@ -247,10 +280,14 @@ class GTCFRSolver():
             # The opponent players' ranges are randomized during node initialization.
             #
             player_range = uniform_range(input_game.public_cards)
+            player_ranges = GTCFRSolver.compute_initial_ranges(input_game, player_range)
             #
             # Initialize the root node of the public game tree
             #
-            self.root = DecisionNode(copy.deepcopy(input_game), player_range)
+            # NOTE - Do we need this to be a deepcopy?
+            #        Nothing should be editing the game state while we solve.
+            #
+            self.root = DecisionNode(copy.deepcopy(input_game), player_ranges)
             #
             # Initialize the gadget game
             #
@@ -296,9 +333,15 @@ class GTCFRSolver():
         #
         elif self.root is None and all(x is not None for x in (input_player_range, input_opponent_values)):
             #
+            # The acting player's range is given, randomize the opponent ranges.
+            #
+            player_ranges = GTCFRSolver.compute_initial_ranges(input_game, input_player_range)
+            #
             # Initialize the root node with the player's values
             #
-            self.root = DecisionNode(copy.deepcopy(input_game), np.copy(input_player_range))
+            # NOTE - Same as Case 1, not sure if this needs to be a deepcopy.
+            #
+            self.root = DecisionNode(copy.deepcopy(input_game), player_ranges)
             #
             # Initialize the gadget game with the opponent's values
             #
