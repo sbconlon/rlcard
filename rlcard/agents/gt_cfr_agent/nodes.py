@@ -248,17 +248,18 @@ class TerminalNode(CFRNode):
     # Convert the 5 board cards to a unique string
     #
     @classmethod
-    def five_cards_to_str(board: list[Card]) -> str:
+    def five_cards_to_str(cls, board: list[Card]) -> str:
         assert len(board) == 5, "Only compute payoffs for river showdowns"
         output = ''
-        for card in sorted(board, key=lambda c: c.to_int):
+        for card in sorted(board, key=lambda c: c.to_int()):
             output += str(card)
         return output
     
     #
     # Check if the board for the game is in the payoffs cache
     #
-    def is_in_cache(game: NolimitholdemGame) -> bool:
+    @classmethod
+    def is_in_cache(cls, game: NolimitholdemGame) -> bool:
         board_id = TerminalNode.five_cards_to_str(game.public_cards)
         return board_id in TerminalNode.payoffs_cache
 
@@ -318,7 +319,7 @@ class TerminalNode(CFRNode):
     #          manually with each value_update call. Rather than being cached here.
     #
     @classmethod
-    def cache_payoffs(game: NolimitholdemGame):
+    def cache_payoffs(cls, game: NolimitholdemGame):
         #
         # Check that the payoff matrix for this board hasn't already been computed
         #
@@ -434,7 +435,6 @@ class TerminalNode(CFRNode):
     # NOTE - right now, we store the entire game object
     #
     def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
-        import ipdb; ipdb.set_trace()
         #
         # Use the inherited initialization function
         #
@@ -465,14 +465,14 @@ class TerminalNode(CFRNode):
             # Store it in memory for fast computation update_values() function.
             #
             if not TerminalNode.is_in_cache(self.game):
-                self.cache_payoffs(self.game)
+                TerminalNode.cache_payoffs(self.game)
         #
         # Else, all the player's folded except for one.
         # In this case, the payouts are independent of the hands
         # the players are holding.
         #
         elif self.num_active == 1:
-            self.payouts = self.game.get_payoffs()
+            self.payoffs = self.game.get_payoffs()
         else:
             raise ValueError("Terminal node reached with zero active players")
         #
@@ -508,7 +508,7 @@ class TerminalNode(CFRNode):
         if self.num_active > 1:
             assert TerminalNode.is_in_cache(self.game), "Cant update values if the node's payoffs havent been computed"
             key = TerminalNode.five_cards_to_str(self.game.public_cards)
-            payoffs = TerminalNode.cache_payoffs[key]
+            payoffs = TerminalNode.payoffs_cache[key]
 
         #
         # For each player...
@@ -524,10 +524,12 @@ class TerminalNode(CFRNode):
             #
             # Compute the expected value matrix for player pid
             #
+            # Note: payoffs from the cache have to be scaled by the pot size
+            #
             if self.num_active > 1:
-                self.values[pid] = self.game.pot * (payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
+                self.values[pid] = self.game.dealer.pot * (payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
             else:
-                self.values[pid] = np.triu(np.ones((52, 52)) * self.payoffs[pid], k=1) # NOTE - Should we zero impossible hands?
+                self.values[pid] = np.triu(np.ones((52, 52)) * self.payoffs[pid], k=1) * self.player_ranges[opp_pid]
         #
         # No querries were made to the cfvn
         #
@@ -678,6 +680,8 @@ class DecisionNode(CFRNode):
         regret_sum = np.sum(regret_pos, axis=0, keepdims=True) # sum along actions axis, (1, 52, 52) array
         regret_sum[regret_sum == 0] = 1 # avoid dividing by zero
         self.strategy = regret_pos / regret_sum
+        if np.isnan(self.strategy).any():
+            import ipdb; ipdb.set_trace()
     
     #
     # Estimate this node's values using the cfvn
@@ -946,7 +950,10 @@ class DecisionNode(CFRNode):
         # Sample an action using the acting player's strategy
         #
         strat = strat / np.sum(strat) # renormalize to avoid floating point error weirdness
-        action = np.random.choice(len(strat), p=strat)
+        try:
+            action = np.random.choice(self.actions, p=strat)
+        except:
+            import ipdb; ipdb.post_mortem()
         #
         # Check that this child is not None
         #

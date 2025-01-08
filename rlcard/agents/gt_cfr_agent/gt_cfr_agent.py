@@ -412,7 +412,8 @@ class GTCFRSolver():
         #         and, self.gadget_regret[1] be the Terminate action regrets
         #
         gadget_regrets_positives = np.maximum(self.gadget_regrets, 0)
-        gadget_follow_strat = gadget_regrets_positives[0] / (gadget_regrets_positives[0] + gadget_regrets_positives[1])
+        denom = gadget_regrets_positives[0] + gadget_regrets_positives[1]
+        gadget_follow_strat = gadget_regrets_positives[0] / np.where(denom==0, 1, denom)
 
         #
         # Set the opponent's range in the cfr root node to the gadget's follow strategy 
@@ -423,6 +424,7 @@ class GTCFRSolver():
         #     Therefore, gadget follow strat = opponent's range at the root node. 
         #
         opp_pid = (self.root.game.game_pointer + 1) % 2
+        import ipdb; ipdb.set_trace()
         self.root.player_ranges[opp_pid] = gadget_follow_strat
 
         #
@@ -499,14 +501,15 @@ class GTCFRSolver():
         #
         for pid in range(self.decision_point.game.num_players):
             #
-            # Flatten the player's range to make sampling easier
+            # Get the probability the player is holing each hand
             #
-            hand_probs = self.decision_point.player_ranges[pid].flatten()
+            hand_probs = np.copy(self.decision_point.player_ranges[pid])
             #
             # Mask out cards that have already been taken
             #
-            for card1, card2 in used_cards:
-                hand_probs[52 * card1 + card2] = 0
+            for card_idx in used_cards:
+                hand_probs[card_idx, :] = 0.
+                hand_probs[:, card_idx] = 0.
             #
             # Normalize the hand probabilities
             #
@@ -514,7 +517,7 @@ class GTCFRSolver():
             #
             # Sample a hand
             #
-            idx = np.random.choice(hand_probs.size, p=hand_probs)
+            idx = np.random.choice(hand_probs.size, p=hand_probs.flatten())
             #
             # Convert the 1D idx back to 2D hand, (card1, card2)
             #
@@ -530,14 +533,15 @@ class GTCFRSolver():
             #
             # Update used cards set
             #
-            set.add(hand)
+            used_cards.add(hand[0])
+            used_cards.add(hand[1])
         #
         # Try to add a node to the subtree,
         # using the given hand to sample a trajectory
         #
         max_attempts = 10
         attempts = 0
-        while not decision_point.grow_tree(hands) and attempts < max_attempts:
+        while not self.decision_point.grow_tree(hands) and attempts < max_attempts:
             attempts += 1
     
     #
@@ -548,7 +552,8 @@ class GTCFRSolver():
         # Each iteration computes the values of each node in the public state tree,
         # then adds a new leaf node to the tree.
         #
-        for _ in range(self.n_expansions):
+        for i in range(self.n_expansions):
+            print(f'--> GT-CFR loop {i}')
             #
             # Run cfr to update the policy and regret estimates 
             # for each state in the tree
@@ -591,7 +596,9 @@ class GTCFRSolver():
         #
         # Initialize the game tree for cfr
         #
+        import ipdb; ipdb.set_trace()
         self.init_game_tree(game, input_opponent_values, input_player_range, trajectory_seed)
+        import ipdb; ipdb.set_trace()
         #
         # GT-CFR training run 
         #
