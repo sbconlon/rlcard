@@ -229,6 +229,16 @@ class CFRNode(ABC):
 class TerminalNode(CFRNode):
 
     #
+    # Payouts in showdown settings are only determined by the public cards.
+    # Therefore, the Terminal nodes can share a cache of computed payoff
+    # matrices.
+    #
+    # In practice, this is a great speedup because the game tree encounters
+    # many of the same showdowns when considering river decisions.
+    #
+    self.cached_payoffs{} # str representation of public cards -> payoff matrix
+
+    #
     # NOTE 1 - the payoffs returned by update_values() depend on how this terminal
     #          node was reached
     #
