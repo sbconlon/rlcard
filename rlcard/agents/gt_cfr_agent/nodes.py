@@ -25,6 +25,7 @@ from sparse import COO
 
 # Internal imports
 from rlcard.agents.gt_cfr_agent.cvfn import CounterfactualValueNetwork
+from rlcard.games.limitholdem import PlayerStatus
 from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
 from rlcard.games.nolimitholdem.round import Action
 from rlcard.utils.utils import init_standard_deck
@@ -270,15 +271,32 @@ class TerminalNode(CFRNode):
         super().__init__(game, player_ranges)
         self.is_active = True
         #
-        # Poker games are terminated with showdowns
+        # TerminalNodes only represent completed game states
         #
-        assert self.game.is_over() # TerminalNodes only represent completed game states
+        assert self.game.is_over()
         #
-        # Compute the payoff matrix for this node.
+        # If this is a showdown, we need to compute the full
+        # payoff matrix.
         #
-        # Store it in memory for fast computation update_values() function.
+        # NOTE - Should we split this into two child classes?
         #
-        self.cache_payoffs()
+        self.num_active = sum([p.status != PlayerStatus.FOLDED for p in self.game.players])
+        if self.num_active > 1:
+            #
+            # Compute the payoff matrix for this node.
+            #
+            # Store it in memory for fast computation update_values() function.
+            #
+            self.cache_payoffs()
+        #
+        # Else, all the player's folded except for one.
+        # In this case, the payouts are independent of the hands
+        # the players are holding.
+        #
+        elif self.num_active == 1:
+            self.payouts = self.game.get_payoffs()
+        else:
+            raise ValueError("Terminal node reached with zero active players")
         #
         # Value of each hand, for each player
         #
@@ -447,7 +465,10 @@ class TerminalNode(CFRNode):
             #
             # Compute the expected value matrix for player pid
             #
-            self.values[pid] = (self.payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
+            if self.num_active > 1:
+                self.values[pid] = (self.payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
+            else:
+                self.values[pid] = np.triu(np.ones((52, 52)) * self.payoffs[pid], k=1) # NOTE - Should we zero impossible hands?
         #
         # No querries were made to the cfvn
         #
@@ -614,7 +635,7 @@ class DecisionNode(CFRNode):
         #
         # Query the network
         #
-        self.values, self.strategy = DecisionNode.get_cvfn().query(input)
+        self.strategy, self.values = DecisionNode.get_cvfn().query(input)
 
     #
     # Perform a CFR value and strategy update

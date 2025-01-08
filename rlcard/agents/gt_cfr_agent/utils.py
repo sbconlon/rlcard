@@ -3,6 +3,7 @@ import copy
 from itertools import combinations, permutations
 import numpy as np
 from pathlib import Path
+import tensorflow as tf
 
 # Internal imports
 from rlcard.games.base import Card
@@ -145,4 +146,11 @@ def compute_starting_hand_values(game: NolimitholdemGame, N: int = 10000) -> np.
     #
     return np.where(acc_visits != 0, acc_values / acc_visits, 0)
 
-
+#
+# Tensorflow network layer that normalizes the columns of the input matrix
+#
+def normalize_columns(x, epsilon=1e-10):
+    import ipdb; ipdb.set_trace()
+    col_sums = tf.reduce_sum(x, axis=0, keepdims=True)
+    col_sums = tf.where(col_sums == 0, epsilon, col_sums)  # Avoid divide-by-zero
+    return tf.divide(x, col_sums)

@@ -553,7 +553,6 @@ class GTCFRSolver():
             # Run cfr to update the policy and regret estimates 
             # for each state in the tree
             #
-            import ipdb; ipdb.set_trace()
             self.cfr()
             #
             # Add a new state node to the game tree

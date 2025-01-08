@@ -38,6 +38,7 @@ import time
 
 # Internal imports
 from rlcard.agents.gt_cfr_agent.fifo_buffer import FIFOBuffer
+from rlcard.agents.gt_cfr_agent.utils import normalize_columns
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
 
 if TYPE_CHECKING:
@@ -143,8 +144,12 @@ class CounterfactualValueNetwork:
         # NOTE - I think 'softmax' is the activation we want here because it yeilds
         #        normalized probability estimates.
         #
-        strategy_output = Dense(num_actions * 1326, activation='softmax')(layer)
+        #        A: Using a custom 'normalize_columns' output layer
+        #
+        strategy_output = tf.keras.layers.Dense(num_actions * 1326, activation='linear')(layer)
         strategy_output = tf.keras.layers.Reshape((num_actions, 1326))(strategy_output)
+        strategy_output = tf.keras.layers.Softmax(axis=1)(strategy_output)
+        #strategy_output = tf.keras.layers.Lambda(normalize_columns)(strategy_output)
         #
         # Values output, (num_players, 1326)
         #
@@ -384,8 +389,33 @@ class CounterfactualValueNetwork:
     # Note: the input should come from the to_vect() function.
     #
     def query(self, input : np.ndarry) -> tuple[np.ndarray]:
+        #
+        # Verify that the input vector matches the dimensions of the network
+        #
         assert input.shape == (self.input_dim,), "Unexpected input dimension"
-        return self.network(input)
+        #
+        # Run inference
+        #
+        tf_strategy, tf_values =  self.network(np.expand_dims(input, axis=0))
+        #
+        # Format the tensorflow output back into triu numpy arrays
+        #
+        np_strategy = np.zeros((self.num_actions, 52, 52))
+        idxs = np.triu_indices(52, k=1)
+        # Ensure tensor output is converted to NumPy and squeezed to remove batch dimension
+        tf_strategy = tf_strategy.numpy().squeeze(axis=0)  # Shape: (num_actions, 1326)
+        # Map each action's strategy into the upper triangular array
+        for action in range(self.num_actions):
+            np_strategy[action][idxs] = tf_strategy[action]  # Fill upper-triangle entries
+        # Repeat for the values array
+        np_values = np.zeros((self.num_players, 52, 52))
+        tf_values = tf_values.numpy().squeeze(axis=0) # Shape: (num_players, 1326)
+        for player in range(self.num_players):
+            np_values[player][idxs] = tf_values[player]
+        #
+        # Return the numpy triu matrices as a tuple
+        #
+        return np_strategy, np_values
 
     #
     # Add a query to the query queue for solving
