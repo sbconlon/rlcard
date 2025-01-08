@@ -39,5 +39,10 @@ agent = GTCFRAgent(env)
 #
 # Run self-play training episodes
 #
-for episode in range(num_episodes):
-    agent.self_play()
+try:
+    for episode in range(num_episodes):
+        agent.self_play()
+except:
+    import ipdb; ipdb.post_mortem()
+
+import ipdb; ipdb.set_trace()
