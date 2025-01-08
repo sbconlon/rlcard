@@ -226,6 +226,8 @@ class CFRNode(ABC):
 #
 # This node type represents an endpoint for the game.
 #
+# NOTE - This class should probably be refactored for readability.
+#
 class TerminalNode(CFRNode):
 
     #
@@ -236,87 +238,29 @@ class TerminalNode(CFRNode):
     # In practice, this is a great speedup because the game tree encounters
     # many of the same showdowns when considering river decisions.
     #
-    self.cached_payoffs{} # str representation of public cards -> payoff matrix
+    # NOTE - Be careful, as of now, this is not thread safe!!!
+    #
+    payoffs_cache = {} # str representation of public cards -> payoff matrix
 
     #
-    # NOTE 1 - the payoffs returned by update_values() depend on how this terminal
-    #          node was reached
+    # Hash function for the payoffs cache
     #
-    #          There are two ways a nolimitholdem game can end
+    # Convert the 5 board cards to a unique string
     #
-    #            1) A player folds
-    #                --> the entire payout goes to the other player
-    #
-    #            2) A player checks or calls on the river
-    #                --> the player's payouts are determined by a showdown
-    #
-    #           Currently, (2) is written into the code, but (1) is not.
-    #
-    #
-    #  NOTE 2 - follow up to Note 1 -
-    #
-    #     I think the easiest way to handle this (and how I think
-    #     rlcard handles it inside the nolimitholdem game class) is
-    #     to treat (1) as a special case of (2) where the last
-    #     remaining player goes to a single player showdown.
-    #     (trivially, this just means that player recieves the entire pot). 
-    #
+    @classmethod
+    def five_cards_to_str(board: list[Card]) -> str:
+        assert len(board) == 5, "Only compute payoffs for river showdowns"
+        output = ''
+        for card in sorted(board, key=lambda c: c.to_int):
+            output += str(card)
+        return output
     
     #
-    # Only store the information neccessary for computing player payoffs.
+    # Check if the board for the game is in the payoffs cache
     #
-    # NOTE - right now, we store the entire game object
-    #
-    def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
-        #
-        # Use the inherited initialization function
-        #
-        # Note: all terminal nodes are activated by default
-        #
-        # NOTE - for now, I don't see a reason why terminal nodes
-        #        should be considered 'deactivated', but this might
-        #        change depending on the overhead for computing
-        #        payoff matrices.
-        #
-        super().__init__(game, player_ranges)
-        self.is_active = True
-        #
-        # TerminalNodes only represent completed game states
-        #
-        assert self.game.is_over()
-        #
-        # If this is a showdown, we need to compute the full
-        # payoff matrix.
-        #
-        # NOTE - Should we split this into two child classes?
-        #
-        self.num_active = sum([p.status != PlayerStatus.FOLDED for p in self.game.players])
-        if self.num_active > 1:
-            #
-            # Compute the payoff matrix for this node.
-            #
-            # Store it in memory for fast computation update_values() function.
-            #
-            self.cache_payoffs()
-        #
-        # Else, all the player's folded except for one.
-        # In this case, the payouts are independent of the hands
-        # the players are holding.
-        #
-        elif self.num_active == 1:
-            self.payouts = self.game.get_payoffs()
-        else:
-            raise ValueError("Terminal node reached with zero active players")
-        #
-        # Value of each hand, for each player
-        #
-        # values[pid, card1, card2]
-        #
-        #     = exp. payoff for player pid when holding hand (card1, card2)
-        #
-        #     = sum_{card3, card4} opp_range[card2, card3] * payoff[pid, card1, card2, card3, card4] 
-        #
-        self.values = np.zeros((self.game.num_players, 52, 52))
+    def is_in_cache(game: NolimitholdemGame) -> bool:
+        board_id = TerminalNode.five_cards_to_str(game.public_cards)
+        return board_id in TerminalNode.payoffs_cache
 
     #
     # Caches the payoff matrix for each hand combination
@@ -373,7 +317,14 @@ class TerminalNode(CFRNode):
     #          In >2 player games, the payoffs will likely have to be computed
     #          manually with each value_update call. Rather than being cached here.
     #
-    def cache_payoffs(self):
+    @classmethod
+    def cache_payoffs(game: NolimitholdemGame):
+        #
+        # Check that the payoff matrix for this board hasn't already been computed
+        #
+        board = TerminalNode.five_cards_to_str(game.public_cards)
+        assert board not in TerminalNode.payoffs_cache
+
         #
         # Remember the actual hands for each player
         #
@@ -381,13 +332,13 @@ class TerminalNode(CFRNode):
         #          for the time being, we will insist that each node stores an accurate,
         #          full game state representation, even if this is not neccessary for this node.
         #
-        real_hands = [self.game.players[pid].hand for pid in range(self.game.num_players)]
+        real_hands = [game.players[pid].hand for pid in range(game.num_players)]
 
         #
         # Initialize payoffs matrix to all zeros
         #
-        shape = [self.game.num_players] + [52, 52]*self.game.num_players
-        self.payoffs = np.zeros(shape, dtype=np.float64)
+        shape = [game.num_players] + [52, 52]*game.num_players
+        payoffs = np.zeros(shape, dtype=np.float64)
         #self.payoffs = COO(
         #                   coords=np.empty((0, len(shape)), dtype=np.int64),  # No coordinates
         #                   data=np.empty(0, dtype=np.float64),                # No values
@@ -398,7 +349,7 @@ class TerminalNode(CFRNode):
         # Get the set of possible cards 
         # the players can have in their hands
         #
-        possible_cards = [card for card in init_standard_deck() if card not in self.game.public_cards]
+        possible_cards = [card for card in init_standard_deck() if card not in game.public_cards]
 
         #
         # For each possible hand combination...
@@ -410,7 +361,7 @@ class TerminalNode(CFRNode):
         #     permulations(..., num_player) 
         #         = list of all possible hand assignments to each player
         #
-        for hands in permutations(combinations(possible_cards, 2), self.game.num_players):
+        for hands in permutations(combinations(possible_cards, 2), game.num_players):
             #
             # Filter out hand combinations that share cards
             #
@@ -423,12 +374,12 @@ class TerminalNode(CFRNode):
             # Assign the hypothetical hands to each player in the game instance
             #
             for pid, hand in enumerate(hands):
-                self.game.players[pid].hand = list(hand)
+                game.players[pid].hand = list(hand)
             #
             # Compute the payoffs for this hand configuration 
             # in this node's game state
             #
-            hand_payoffs = self.game.get_payoffs()
+            hand_payoffs = game.get_payoffs()
             #
             # Translate cards in the hand configuration to indexes
             #
@@ -436,14 +387,104 @@ class TerminalNode(CFRNode):
             #
             # Set each player's payoffs in the matrix
             #
+            # Note: Scale each payout by the pot size.
+            #       This way, showdowns with different pot sizes can share the same payout matrix
+            #
             for pid in range(len(hands)):
-                self.payoffs[pid, *card_idxs] = hand_payoffs[pid]
+                payoffs[pid, *card_idxs] = hand_payoffs[pid] / game.dealer.pot
         
         #
         # Restore the players' real hands in the game object
         #
         for pid, hand in enumerate(real_hands):
-            self.game.players[pid].hand = hand
+            game.players[pid].hand = hand
+        #
+        # Save the computed payout matrix in the payout cache
+        #
+        TerminalNode.payoffs_cache[board] = payoffs
+
+
+    #
+    # NOTE 1 - the payoffs returned by update_values() depend on how this terminal
+    #          node was reached
+    #
+    #          There are two ways a nolimitholdem game can end
+    #
+    #            1) A player folds
+    #                --> the entire payout goes to the other player
+    #
+    #            2) A player checks or calls on the river
+    #                --> the player's payouts are determined by a showdown
+    #
+    #           Currently, (2) is written into the code, but (1) is not.
+    #
+    #
+    #  NOTE 2 - follow up to Note 1 -
+    #
+    #     I think the easiest way to handle this (and how I think
+    #     rlcard handles it inside the nolimitholdem game class) is
+    #     to treat (1) as a special case of (2) where the last
+    #     remaining player goes to a single player showdown.
+    #     (trivially, this just means that player recieves the entire pot). 
+    #
+    
+    #
+    # Only store the information neccessary for computing player payoffs.
+    #
+    # NOTE - right now, we store the entire game object
+    #
+    def __init__(self, game : NolimitholdemGame, player_ranges : np.array):
+        import ipdb; ipdb.set_trace()
+        #
+        # Use the inherited initialization function
+        #
+        # Note: all terminal nodes are activated by default
+        #
+        # NOTE - for now, I don't see a reason why terminal nodes
+        #        should be considered 'deactivated', but this might
+        #        change depending on the overhead for computing
+        #        payoff matrices.
+        #
+        super().__init__(game, player_ranges)
+        self.is_active = True
+        #
+        # TerminalNodes only represent completed game states
+        #
+        assert self.game.is_over()
+        #
+        # If this is a showdown, we need to compute the full
+        # payoff matrix.
+        #
+        # NOTE - Should we split this into two child classes?
+        #
+        self.num_active = sum([p.status != PlayerStatus.FOLDED for p in self.game.players])
+        if self.num_active > 1:
+            #
+            # Compute the payoff matrix for this node.
+            #
+            # Store it in memory for fast computation update_values() function.
+            #
+            if not TerminalNode.is_in_cache(self.game):
+                self.cache_payoffs(self.game)
+        #
+        # Else, all the player's folded except for one.
+        # In this case, the payouts are independent of the hands
+        # the players are holding.
+        #
+        elif self.num_active == 1:
+            self.payouts = self.game.get_payoffs()
+        else:
+            raise ValueError("Terminal node reached with zero active players")
+        #
+        # Value of each hand, for each player
+        #
+        # values[pid, card1, card2]
+        #
+        #     = exp. payoff for player pid when holding hand (card1, card2)
+        #
+        #     = sum_{card3, card4} opp_range[card2, card3] * payoff[pid, card1, card2, card3, card4] 
+        #
+        self.values = np.zeros((self.game.num_players, 52, 52))
 
     #
     # Given a state node in the public state tree, compute the updated cfr values, 
@@ -462,6 +503,14 @@ class TerminalNode(CFRNode):
     #
     def update_values(self) -> list:
         #
+        # Look up the payoffs matrix in the cache, if this is a river showdown
+        #
+        if self.num_active > 1:
+            assert TerminalNode.is_in_cache(self.game), "Cant update values if the node's payoffs havent been computed"
+            key = TerminalNode.five_cards_to_str(self.game.public_cards)
+            payoffs = TerminalNode.cache_payoffs[key]
+
+        #
         # For each player...
         #
         for pid in range(self.game.num_players):
@@ -469,14 +518,14 @@ class TerminalNode(CFRNode):
             # If pid is 0, then the opponent's pid is 1
             # And, vice versa.
             #
-            # NOTE - eventually, this should be rewritten for >2 player games
+            # NOTE - Eventually, this should be rewritten for >2 player games
             #
             opp_pid = (pid + 1) % 2
             #
             # Compute the expected value matrix for player pid
             #
             if self.num_active > 1:
-                self.values[pid] = (self.payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
+                self.values[pid] = self.game.pot * (payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
             else:
                 self.values[pid] = np.triu(np.ones((52, 52)) * self.payoffs[pid], k=1) # NOTE - Should we zero impossible hands?
         #
