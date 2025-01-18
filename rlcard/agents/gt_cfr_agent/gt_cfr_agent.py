@@ -176,7 +176,7 @@ class GTCFRSolver():
         #
         # Return the node in the game tree, or its closest ancestor
         #
-        return self.root.search(target_game.trajectory, target_game.game_pointer)
+        return self.root.search(target_game.trajectory)
 
     #
     # Given the acting player's range, assign randomized ranges
