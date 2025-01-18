@@ -8,14 +8,14 @@ import random
 from typing import TYPE_CHECKING
 
 # Internal imports
-from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode
+from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode, ChanceNode
 from rlcard.agents.gt_cfr_agent.utils import uniform_range, random_range, starting_hand_values
 from rlcard.envs.nolimitholdem import NolimitholdemEnv
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
 
 # Avoid a circular import
 if TYPE_CHECKING:
-    from rlcard.agents.gt_cfr_agent.cvfn import CounterfactualValueNetwork # Only imports for type hints
+    from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork # Only imports for type hints
 
 #
 # This class immplements the GT-CFR algorithm
@@ -32,7 +32,7 @@ class GTCFRSolver():
     #
     def __init__(self, input_cfvn: CounterfactualValueNetwork =None, prob_query_solve: float =0.9):
         # Import at runtime
-        from rlcard.agents.gt_cfr_agent.cvfn import CounterfactualValueNetwork
+        from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork
         
         #
         # Initialize the counterfactual value model, if one is not given.
@@ -279,8 +279,14 @@ class GTCFRSolver():
             #
             # The opponent players' ranges are randomized during node initialization.
             #
-            player_range = uniform_range(input_game.public_cards)
-            player_ranges = GTCFRSolver.compute_initial_ranges(input_game, player_range)
+            #player_range = uniform_range(input_game.public_cards)
+            #player_ranges = GTCFRSolver.compute_initial_ranges(input_game, player_range)
+            
+            # NOTE - DEBUG
+            player_ranges = np.zeros((2, 52, 52))
+            player_ranges[0] = uniform_range(input_game.public_cards)
+            player_ranges[1] = uniform_range(input_game.public_cards)
+            
             #
             # Initialize the root node of the public game tree
             #
@@ -360,9 +366,15 @@ class GTCFRSolver():
         #
         CFRNode.set_root_pid = input_game.game_pointer
         #
-        # Store a reference to the CVFN in the game tree
+        # Store a reference to the CFVN in the game tree
         #
-        CFRNode.set_cvfn(self.cfvn)
+        CFRNode.set_cfvn(self.cfvn)
+        
+        # NOTE - Activate the full game tree for debugging purpuses
+        self.root.activate_full_tree()
+        self.decision_point = self.root
+        
+        """
         #
         # Activate the root node
         #
@@ -382,7 +394,7 @@ class GTCFRSolver():
                 elif isinstance(node, ChanceNode):
                     node = node.outcomes[self.trajectory_seed[i]]
                 else:
-                    raise ValueError("Terminal node should not be encountered on a seed trajectory")
+                    raise ValueError('Terminal node should not be encountered on a seed trajectory')
             self.decision_point = node
         #
         # Otherwise, activate the root node's children
@@ -392,6 +404,7 @@ class GTCFRSolver():
                 if not child.is_active:
                     child.activate()
             self.decision_point = self.root
+        """
 
     #
     # Update the regrets in the gadget game
@@ -413,7 +426,8 @@ class GTCFRSolver():
         #
         gadget_regrets_positives = np.maximum(self.gadget_regrets, 0)
         denom = gadget_regrets_positives[0] + gadget_regrets_positives[1]
-        gadget_follow_strat = gadget_regrets_positives[0] / np.where(denom==0, 1, denom)
+        safe_denom = np.where(denom == 0, 1, denom) # remove zeros from denom to avoid dividing by zero
+        gadget_follow_strat = np.where(denom == 0, 0.5, gadget_regrets_positives[0] / safe_denom)
 
         #
         # Set the opponent's range in the cfr root node to the gadget's follow strategy 
@@ -424,7 +438,6 @@ class GTCFRSolver():
         #     Therefore, gadget follow strat = opponent's range at the root node. 
         #
         opp_pid = (self.root.game.game_pointer + 1) % 2
-        import ipdb; ipdb.set_trace()
         self.root.player_ranges[opp_pid] = gadget_follow_strat
 
         #
@@ -457,6 +470,8 @@ class GTCFRSolver():
         # Update the gadget values to the new values
         #
         self.gadget_values = new_gadget_values
+        
+        #print({'Follow Regret': self.gadget_values[0], 'Terminate Regret': self.gadget_values[1]})
 
     #
     # Public tree counterfactual regret minimization.
@@ -464,7 +479,7 @@ class GTCFRSolver():
     # CFR starts on the root state, self.root, and recurses down through
     # the game tree nodes.
     #
-    def cfr(self) -> None:
+    def cfr(self, train=False) -> None:
         #
         # Run for a fixed number of value updates on the tree.
         #
@@ -472,11 +487,22 @@ class GTCFRSolver():
             #
             # Perform one iteration of value and strategy updates on the game tree
             #
-            self.root.update_values()
+            #self.root.print_tree()
+            #import ipdb; ipdb.set_trace()
+            querries = self.root.update_values()
+            #
+            # Fully solve a subset of cvpn queries from this cfr update
+            #
+            if train:
+                for q in querries:
+                    if random.random() < self.prob_query_solve:
+                        self.cfvn.add_to_query_queue(q)
             #
             # Update gadget regrets
             #
-            self.update_gadget_regrets()
+            #self.update_gadget_regrets() # DEBUG
+        #print(self.root.print_tree())
+        #import ipdb; ipdb.set_trace()
 
     #
     # Add a node to the game tree
@@ -489,7 +515,7 @@ class GTCFRSolver():
     # In some instances, the sampled trajectory will lead
     # to a terminal node. In which case, another trajectory should be sampled.
     #
-    def grow(self):
+    def grow(self) -> None:
         #
         # Sample hand assignments for each player, weighted by their ranges
         # in the root node.
@@ -547,22 +573,22 @@ class GTCFRSolver():
     #
     # Growing Tree Counterfacutal Regret
     #
-    def gt_cfr(self) -> None:
+    def gt_cfr(self, train=False) -> None:
         #
         # Each iteration computes the values of each node in the public state tree,
         # then adds a new leaf node to the tree.
         #
         for i in range(self.n_expansions):
-            print(f'--> GT-CFR loop {i}')
+            #print(f'--> GT-CFR loop {i}')
             #
             # Run cfr to update the policy and regret estimates 
             # for each state in the tree
             #
-            self.cfr()
+            self.cfr(train=train)
             #
             # Add a new state node to the game tree
             #
-            self.grow()
+            #self.grow() # NOTE - DEBUG
     
     #
     # Wrapper function around gt-cfr to handle fully solving a 
@@ -578,13 +604,8 @@ class GTCFRSolver():
         #
         # Run gt-cfr
         #
-        queries = self.gt_cfr()
-        #
-        # Fully solve a subset of cvpn queries from this gt_cfr run
-        #
-        for q in queries:
-            if random.random() < self.prob_query_solve:
-                self.cvfn.add_to_query_queue(q)
+        self.gt_cfr(train=True)
+
 
     #
     # Return a policy and value estimate for the given game state using gt-cfr
@@ -596,9 +617,7 @@ class GTCFRSolver():
         #
         # Initialize the game tree for cfr
         #
-        import ipdb; ipdb.set_trace()
         self.init_game_tree(game, input_opponent_values, input_player_range, trajectory_seed)
-        import ipdb; ipdb.set_trace()
         #
         # GT-CFR training run 
         #
@@ -649,7 +668,7 @@ class GTCFRAgent():
 
         #
         # Probability of adding a CFR solver output in the
-        # self-play trajectory to the cvfn's replay buffer
+        # self-play trajectory to the cfvn's replay buffer
         #
         self.prob_add_to_buffer = 0 # called 'p_td1' in the literature
                                     # disabled by default
@@ -683,7 +702,7 @@ class GTCFRAgent():
             #
             pid = self.env.get_player_id()
             state = self.env.get_state(pid)
-            legal_actions = state['legal_actions'].keys()
+            legal_actions = self.env.game.get_legal_actions()
             player_hand = self.env.game.players[pid].hand
 
             #
@@ -705,8 +724,21 @@ class GTCFRAgent():
             # Sort the card idxs because the arrays are upper triangular
             #
             hand_idxs = sorted([card.to_int() for card in player_hand])
-            ev = cfr_values[hand_idxs]
-            cfr_policy = cfr_policies[:, hand_idxs]
+            ev = cfr_values[pid, hand_idxs[0], hand_idxs[1]]
+            cfr_policy = cfr_policies[:, hand_idxs[0], hand_idxs[1]]
+            print('===============================')
+            print(f'Board = {str([str(c) for c in self.env.game.public_cards])}')
+            print(f'Pot = {self.env.game.dealer.pot}')
+            print()
+            print(f'Player {pid} - hand = ({str(player_hand[0])}, {str(player_hand[1])})')
+            print()
+            print(f'Expected value - {ev}')
+            print()
+            print(f'CFR Strategy:')
+            for i, action in enumerate(legal_actions):
+                print(f'    {action} =  {round(cfr_policy[i], 3)}')
+            print()
+            
             
             #
             # Dont waste compute on already decided games
@@ -721,13 +753,20 @@ class GTCFRAgent():
             uniform_policy = np.ones(cfr_policy.shape) / cfr_policy.shape[0]
             mixed_policy = (1-self.epsilon) * cfr_policy + self.epsilon * uniform_policy
 
+            print(f'Mixed Strategy:')
+            for i, action in enumerate(legal_actions):
+                print(f'    {action} =  {round(cfr_policy[i], 3)}')
+            print()
+
             #
             # Select an action
             #
             if num_moves < self.greedy_after_n_moves:
-                action = np.random.choice(legal_actions, mixed_policy)
+                action = np.random.choice(legal_actions, p=mixed_policy)
             else:
                 action = legal_actions[np.argmax(mixed_policy)]
+
+            print(f'Action: {action}')
             
             #
             # Take action

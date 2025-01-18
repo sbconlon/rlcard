@@ -27,7 +27,8 @@ config = {
                                     Card('H', '8')
                                 ],
 
-          'starting_stage': 'river'
+          'starting_stage': 'river',
+          'chips_for_each': 10
 }
 env = rlcard.make('no-limit-holdem', config=config)
 
@@ -41,8 +42,10 @@ agent = GTCFRAgent(env)
 #
 try:
     for episode in range(num_episodes):
+        print(f'Episode {episode + 1}')
         agent.self_play()
-except:
+except Exception as e:
+    print(e)
     import ipdb; ipdb.post_mortem()
 
 import ipdb; ipdb.set_trace()

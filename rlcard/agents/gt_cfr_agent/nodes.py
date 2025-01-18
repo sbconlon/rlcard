@@ -24,7 +24,7 @@ import numpy as np
 from sparse import COO
 
 # Internal imports
-from rlcard.agents.gt_cfr_agent.cvfn import CounterfactualValueNetwork
+from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork
 from rlcard.games.limitholdem import PlayerStatus
 from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
 from rlcard.games.nolimitholdem.round import Action
@@ -84,7 +84,7 @@ class CFRNode(ABC):
     #
     # NOTE - would it make sense to use a different cfvn for each stage of the game?
     #
-    cvfn = None
+    cfvn = None
 
     #
     # NOTE - How to relate nodes to their corresponding game representations
@@ -146,6 +146,7 @@ class CFRNode(ABC):
         #       given that they have the hand (card1, card2)
         #
         self.player_ranges = player_ranges
+        self.check_matrix(self.player_ranges)
         
         #
         # CFR value of holding each possible hand according to the current strategy profile
@@ -167,21 +168,48 @@ class CFRNode(ABC):
     #
     def zero_values(self) -> None:
         self.values = np.zeros((self.game.num_players, 52, 52), dtype=np.float64)
-
+    
+    #
+    # --> Debug functions
+    #
+    # Verify that the player's values have zero entries
+    # corresponding to invalid hands.
+    #
+    def check_matrix(self, matrix):
+        assert matrix.shape[1:] == (52, 52) # Only check hand matrices
+        try:
+            is_error = False
+            for i in range(matrix.shape[0]):
+                card_idxs = [card.to_int() for card in self.game.public_cards]
+                for cid in card_idxs:
+                    if np.any(matrix[i, cid, :]) or np.any(matrix[i, :, cid]):
+                        is_error = True
+                        break
+            if is_error:
+                raise ValueError("Input matrix has non-zero values for invalid hands")
+        except:
+            import ipdb; ipdb.post_mortem()
+    #
+    # Activate the entire game tree
+    # (ABC method)
+    #
+    @classmethod
+    def activate_full_tree(self) -> None:
+        pass
     #
     # --> Class member setters
     #
     # Set the game tree's counterfactual value network
     #
     @classmethod
-    def set_cvfn(cls, cvfn : CounterfactualValueNetwork) -> None:
-        cls.cvfn = cvfn
+    def set_cfvn(cls, cfvn : CounterfactualValueNetwork) -> None:
+        cls.cfvn = cfvn
     #
     # Get the game tree's counterfactual value network
     #
     @classmethod
-    def get_cvfn(cls) -> CounterfactualValueNetwork:
-        return cls.cvfn
+    def get_cfvn(cls) -> CounterfactualValueNetwork:
+        return cls.cfvn
     #
     # Set the player id for the acting player at the root node
     #
@@ -200,7 +228,7 @@ class CFRNode(ABC):
     # --> Abstract base class methods
     #
     # Compute the CFR values for this node,
-    # and return a list of queries made to the cvfn in the node's subtree
+    # and return a list of queries made to the cfvn in the node's subtree
     #
     @abstractmethod
     def update_values(self) -> None:
@@ -392,7 +420,8 @@ class TerminalNode(CFRNode):
             #       This way, showdowns with different pot sizes can share the same payout matrix
             #
             for pid in range(len(hands)):
-                payoffs[pid, *card_idxs] = hand_payoffs[pid] / game.dealer.pot
+                # Node edited indexing to be backward compatible with older version of python
+                payoffs[tuple([pid] + card_idxs)] = hand_payoffs[pid] / game.dealer.pot
         
         #
         # Restore the players' real hands in the game object
@@ -509,6 +538,9 @@ class TerminalNode(CFRNode):
             assert TerminalNode.is_in_cache(self.game), "Cant update values if the node's payoffs havent been computed"
             key = TerminalNode.five_cards_to_str(self.game.public_cards)
             payoffs = TerminalNode.payoffs_cache[key]
+        
+        # DEBUG
+        self.check_matrix(self.player_ranges)
 
         #
         # For each player...
@@ -521,15 +553,79 @@ class TerminalNode(CFRNode):
             # NOTE - Eventually, this should be rewritten for >2 player games
             #
             opp_pid = (pid + 1) % 2
+            
+            """
+            print()
+            history = self.game.trajectory[8:]
+            pstr = '--> Value update on '
+            for aid in history[:-1]:
+                pstr += str(Action(aid)) + ' -> '
+            pstr += str(Action(history[-1]))
+            pstr += ' Terminal Node'
+            print(pstr)
+            print([str(card) for card in self.game.public_cards], f' Pot: {self.game.dealer.pot}')
+            print(f'Player {pid} {tuple(str(card) for card in self.game.players[pid].hand)}')
+            
+            card1, card2 = self.game.players[pid].hand[0].to_int(), self.game.players[pid].hand[1].to_int()
+            print(f'Player {pid} reach prob. = {self.player_ranges[pid, card1, card2]}')
+            """
+            
             #
             # Compute the expected value matrix for player pid
             #
             # Note: payoffs from the cache have to be scaled by the pot size
             #
             if self.num_active > 1:
-                self.values[pid] = self.game.dealer.pot * (payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=(2,3))
+                #
+                # self.player_ranges[opp_pid] -> (52, 52), prob of the opponent holding cards (k, k)
+                # self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :] -> (1, 1, 52, 52), adds two ficticous dimensions
+                # payoffs[pid] -> (52, 52, 52, 52), payoff for pid holding cards (i, j) and opponent holding (k, l)
+                #
+                # payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :] = payoffs[pid][i, j, k, l] * self.player_ranges[opp_pid][k, l] -> (52, 52, 52, 52)
+                #
+                # (payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(2, 3) = sum_{k, l} payoffs[pid][i, j, k, l] * self.player_ranges[opp_pid][k, l] -> (52, 52)
+                #     = self.values[pid]
+                #
+                # self.values[pid][i, j] = sum_{k,l} payoffs[pid][i, j, k, l] * self.player_ranges[k, l]
+                #                        = sum_{all opponent hands} [payoff of pid holding hand (i, j) vs opp_pid holding hand (k, l)] * prob opp_pid is holding hand (k, l) 
+                #
+                sum_axis = (2, 3) if pid == 0 else (0, 1)
+                if pid == 0:
+                    self.values[pid] = self.game.dealer.pot * (payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=sum_axis)
+                else:
+                    self.values[pid] = self.game.dealer.pot * (payoffs[pid] * self.player_ranges[opp_pid][:, :, np.newaxis, np.newaxis]).sum(axis=sum_axis)
+                #print(f'value = pot * sum(opp range) = {self.game.dealer.pot} * {((payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=sum_axis))[card1, card2]} = {self.values[pid, card1, card2]}')
             else:
-                self.values[pid] = np.triu(np.ones((52, 52)) * self.payoffs[pid], k=1) * self.player_ranges[opp_pid]
+                self.values[pid] = np.triu(np.ones((52, 52)) * self.payoffs[pid] * np.sum(self.player_ranges[opp_pid]), k=1)
+                #print(f'value = fixed payoff * prob opp reaches here = {self.payoffs[pid]} * {np.sum(self.player_ranges[opp_pid])} = {self.values[pid, card1, card2]}')
+            #import ipdb; ipdb.set_trace()
+        """
+        if self.num_active > 1:
+            game = copy.deepcopy(self.game)
+            # DEBUG - Hard compute the values
+            deck = init_standard_deck()
+            public_cards = set([card.to_int() for card in self.game.public_cards])
+            debug_values = np.zeros((2, 52, 52))
+            for i in range(52):
+                for j in range(i+1, 52):
+                    for k in range(52):
+                        for l in range(k+1, 52):
+                            card_set = set([i, j, k, l])
+                            if len(card_set) != 4 or not card_set.isdisjoint(public_cards):
+                                continue
+                            game.players[0].hand = [deck[i], deck[j]]
+                            game.players[1].hand = [deck[k], deck[l]]
+                            payoff = game.get_payoffs()
+                            debug_values[0, i, j] += payoff[0] * self.player_ranges[1, k, l]
+                            debug_values[1, k, l] += payoff[1] * self.player_ranges[0, i, j]
+            try:
+                self.check_matrix(debug_values)
+                assert(np.allclose(debug_values, self.values))
+            except Exception as e:
+                import ipdb; ipdb.post_mortem()
+                assert(False)
+            self.values = debug_values
+        """
         #
         # No querries were made to the cfvn
         #
@@ -547,13 +643,22 @@ class TerminalNode(CFRNode):
     #
     def activate(self) -> None:
         pass
-    
+
     #
     # If we hit a terminal node while following the game's trajectory, then
     # the trajectory is inavlid.
     #
     def search(self, trajectory: list[int]) -> DecisionNode:
         raise AssertionError("Search should not be run on a terminal node")
+
+    #
+    # Debug function
+    # 
+    # Terminal nodes are active leaf nodes by default,
+    # so nothing to do here.
+    #
+    def activate_full_tree(self):
+        pass
 
 #
 # Decision node
@@ -650,6 +755,22 @@ class DecisionNode(CFRNode):
         # Get the id for the acting player
         #
         pid = self.game.game_pointer
+        """
+        print()
+        history = self.game.trajectory[8:]
+        if history == []:
+            print(f'--> Strategy update on root')
+        else:
+            pstr = '--> Strategy update on '
+            for aid in history[:-1]:
+                pstr += str(Action(aid)) + ' -> '
+            pstr += str(Action(history[-1]))
+            pstr += ' Decision Node'
+            print(pstr)
+        card1, card2 = self.game.players[pid].hand[0].to_int(), self.game.players[pid].hand[1].to_int()
+        print([str(card) for card in self.game.public_cards], f' Pot: {self.game.dealer.pot}')
+        print(f'Player {pid} {tuple(str(card) for card in self.game.players[pid].hand)}')
+        """
         #
         # Use player values to the update the acting player's regrets
         #
@@ -670,19 +791,35 @@ class DecisionNode(CFRNode):
             #
             # Perform the regret update for this node
             #
-            self.regrets[action_idx] += child.values[pid] - self.values[pid]
+            self.regrets[action_idx] = np.max(self.regrets[action_idx] + child.values[pid] - self.values[pid], 0)
         #
         # Update the acting player's strategy according to the new regrets
         #
         # Using the regret matching formula
         #
-        regret_pos = np.maximum(self.regrets, 0)
-        regret_sum = np.sum(regret_pos, axis=0, keepdims=True) # sum along actions axis, (1, 52, 52) array
-        regret_sum[regret_sum == 0] = 1 # avoid dividing by zero
-        self.strategy = regret_pos / regret_sum
-        if np.isnan(self.strategy).any():
-            import ipdb; ipdb.set_trace()
-    
+        # Note: if all regrets are non-positive, then default to a uniform policy.
+        #
+        regret_sum = np.sum(self.regrets, axis=0, keepdims=True) # sum along actions axis, (1, 52, 52) array
+        denom = np.where(regret_sum == 0, 1, regret_sum) # remove zeros from denom to avoid dividing by zero
+        num_actions = len(self.actions)
+        self.strategy = np.where(regret_sum == 0, 1/num_actions, self.regrets/denom)
+        #
+        # Invalid hands are assigned a uniform policy above.
+        # Mask them out.
+        #
+        public_card_idxs = [card.to_int() for card in self.game.public_cards]
+        for cid in public_card_idxs:
+            self.strategy[:, cid, :] = 0.
+            self.strategy[:, :, cid] = 0.
+        """
+        print(f'Value = {self.values[pid, card1, card2]}')
+        print(f'Child values = {str({self.actions[i]: self.values[pid, card1, card2] for i in range(len(self.actions))})}')
+        print(f'Regrets = {str({self.actions[i]: self.regrets[i, card1, card2] for i in range(len(self.actions))})}')
+        print(f'Strategy = {str({self.actions[i]: self.strategy[i, card1, card2] for i in range(len(self.actions))})}')
+        #if history == []:
+        #    import ipdb; ipdb.set_trace()
+        """
+        
     #
     # Estimate this node's values using the cfvn
     #
@@ -692,18 +829,40 @@ class DecisionNode(CFRNode):
         #
         assert not self.is_active, "CFVN should not be used on active nodes"
         #
-        # Convert the node's information into an input vector for the cvfn
+        # Convert the node's information into an input vector for the cfvn
         #
-        input = DecisionNode.get_cvfn().to_vect(self.game, self.player_ranges, False)
+        input = DecisionNode.get_cfvn().to_vect(self.game, self.player_ranges, False)
         #
         # Query the network
         #
-        self.strategy, self.values = DecisionNode.get_cvfn().query(input)
+        self.strategy, self.values = DecisionNode.get_cfvn().query(input)
+        
+        pid = self.game.game_pointer
+        """
+        opp_pid = (pid + 1) % 2
+        print()
+        history = self.game.trajectory[8:]
+        pstr = '--> CFVN update on '
+        for aid in history[:-1]:
+            pstr += str(Action(aid)) + ' -> '
+        pstr += str(Action(history[-1]))
+        pstr += ' Decision Node'
+        print(pstr)
+        card1, card2 = self.game.players[pid].hand[0].to_int(), self.game.players[pid].hand[1].to_int()
+        card3, card4 = self.game.players[opp_pid].hand[0].to_int(), self.game.players[opp_pid].hand[1].to_int()
+        print([str(card) for card in self.game.public_cards], f' Pot: {self.game.dealer.pot}')
+        print(f'Player {pid} {tuple(str(card) for card in self.game.players[pid].hand)}')
+        print(f'value = {self.values[pid, card1, card2]}')
+        print()
+        print(f'Player {opp_pid} {tuple(str(card) for card in self.game.players[opp_pid].hand)}')
+        print(f'value = {self.values[opp_pid, card3, card4]}')
+        import ipdb; ipdb.set_trace()
+        """
 
     #
     # Perform a CFR value and strategy update
     #
-    # Returns a list of queries made to the cvfn in the node's subtree
+    # Returns a list of queries made to the cfvn in the node's subtree
     #
     def update_values(self) -> list[tuple[np.ndarry]]:
         #
@@ -734,9 +893,24 @@ class DecisionNode(CFRNode):
         #
         self.zero_values()
         #
-        # List to store cvfn queries made by the node's children
+        # List to store cfvn queries made by the node's children
         #
         querries = []
+        """
+        print('================')
+        print()
+        history = self.game.trajectory[8:]
+        if history == []:
+            print(f'--> Root')
+        else:
+            pstr = '--> '
+            for aid in history[:-1]:
+                pstr += str(Action(aid)) + ' -> '
+            pstr += str(Action(history[-1]))
+            pstr += ' Decision Node'
+            print(pstr)
+        """
+        
         #
         # For each child node...
         #
@@ -768,6 +942,17 @@ class DecisionNode(CFRNode):
             action_idx = self.actions.index(action)
             child.player_ranges = np.copy(self.player_ranges)
             child.player_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
+            
+            self.check_matrix(child.player_ranges) # DEBUG
+
+            """
+            opp_pid = (pid + 1) % 2
+            card1, card2 = self.game.players[pid].hand[0].to_int(), self.game.players[pid].hand[1].to_int()
+            card3, card4 = self.game.players[opp_pid].hand[0].to_int(), self.game.players[opp_pid].hand[1].to_int()
+            print(f'Pid reach prob. = {self.strategy[action_idx, card1, card2]} * {self.player_ranges[pid, card1, card2]} = {child.player_ranges[pid, card1, card2]}')
+            print(f'Opp reach prob. = {child.player_ranges[opp_pid, card3, card4]}')
+            """
+
             #
             # Compute the value of the child node
             #
@@ -775,7 +960,7 @@ class DecisionNode(CFRNode):
                 #
                 # Recurse down the game tree to compute the child's values
                 #
-                querries.append(child.update_values())
+                querries += child.update_values()
             else:
                 #
                 # Use the CFVN to estimate the child's values
@@ -804,7 +989,29 @@ class DecisionNode(CFRNode):
             # equal to the value of the child state weighted by the acting player's
             # probability of selecting the action
             #
+            """
+            print()
+            history = self.game.trajectory[8:]
+            if history == []:
+                print(f'--> Value update on root')
+            else:
+                pstr = '--> Value update on '
+                for aid in history[:-1]:
+                    pstr += str(Action(aid)) + ' -> '
+                pstr += str(Action(history[-1]))
+                pstr += ' Decision Node'
+                print(pstr)
+            card1, card2 = self.game.players[pid].hand[0].to_int(), self.game.players[pid].hand[1].to_int()
+            print([str(card) for card in self.game.public_cards], f' Pot: {self.game.dealer.pot}')
+            print(f'Player {pid} {tuple(str(card) for card in self.game.players[pid].hand)}')
+            """
             self.values[pid] += self.strategy[action_idx] * child.values[pid]
+            """
+            print(f'value_[{self.actions[action_idx]}] = strat prob * child value = {self.strategy[action_idx, card1, card2]} * {child.values[pid, card1, card2]} -> {self.values[pid, card1, card2]}')
+            if history == []:
+                import ipdb; ipdb.set_trace()
+            """
+            
             #
             # For the non-acting players,
             #
@@ -814,6 +1021,10 @@ class DecisionNode(CFRNode):
             for opp_pid in range(self.game.num_players):
                 if opp_pid != pid:
                     self.values[opp_pid] += child.values[opp_pid]
+        
+        #print('================')
+        
+
         #
         # Now that the values have changed for this node,
         # the player's regrets and strategies need to be
@@ -862,6 +1073,7 @@ class DecisionNode(CFRNode):
         pid = self.game.game_pointer
         child_ranges = np.copy(self.player_ranges)
         child_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
+        self.check_matrix(child_ranges)
         #
         # Case 1 - Child is a Terminal Node
         #
@@ -950,10 +1162,7 @@ class DecisionNode(CFRNode):
         # Sample an action using the acting player's strategy
         #
         strat = strat / np.sum(strat) # renormalize to avoid floating point error weirdness
-        try:
-            action = np.random.choice(self.actions, p=strat)
-        except:
-            import ipdb; ipdb.post_mortem()
+        action = np.random.choice(self.actions, p=strat)
         #
         # Check that this child is not None
         #
@@ -1039,6 +1248,90 @@ class DecisionNode(CFRNode):
         #        In practice, this should not happen for poker.
         #
         raise ValueError("Given trajectory or ancestor not found")
+    
+    #
+    # Debug function
+    # 
+    # Activate all nodes using DFS traversal
+    #
+    def activate_full_tree(self):
+        self.activate()
+        for child in self.children.values():
+            child.activate_full_tree()
+    #
+    # Debug function
+    #
+    def print_tree(self):
+        from anytree import Node, RenderTree
+        
+        root = Node(name="root", value=self)
+        
+        q = [root]
+        while q:
+            parent_node = q.pop()
+            if isinstance(parent_node.value, DecisionNode):
+                for action in parent_node.value.actions:
+                    child = parent_node.value.children[action]
+                    node = Node(name=action.value, value=child, parent=parent_node)
+                    q.append(node)
+        
+        
+        card1 = self.game.players[0].hand[0].to_int()
+        card2 = self.game.players[0].hand[1].to_int()
+        card3 = self.game.players[1].hand[0].to_int()
+        card4 = self.game.players[1].hand[1].to_int()
+        
+        print()
+        print("Public Cards:", [str(card) for card in self.game.public_cards])
+        print("P0 Hand =", [str(card) for card in self.game.players[0].hand])
+        print("P1 Hand =", [str(card) for card in self.game.players[1].hand])
+        print()
+
+        for pre, fill, node in RenderTree(root):
+            
+            my_pid = node.value.game.game_pointer
+            
+            if node is root:
+                print(f"{pre} {node.name}")
+                print(f"{fill}")
+                print(f"--> P{my_pid} Decision")
+            else:
+                parent = node.parent
+                
+                action = parent.value.actions.index(Action(node.name))
+                
+                parent_pid = parent.value.game.game_pointer
+                
+                if parent_pid == 0:
+                    strat = parent.value.strategy[action, card1, card2]
+                    regret = parent.value.regrets[action, card1, card2]
+                else:
+                    strat = parent.value.strategy[action, card3, card4]
+                    regret = parent.value.regrets[action, card3, card4]
+                
+                print(f"{pre} ({node.name} : strat = {strat}, regret = {regret})")
+                print(f"{fill}")
+                
+                if isinstance(node.value, DecisionNode):
+                     print(f"{fill} --> P{my_pid} Decision")
+                elif isinstance(node.value, TerminalNode):
+                    print(f"{fill} --> Terminal Node")
+                else:
+                    raise ValueError("Unrecognized node type")
+            
+            p0_reach_prob = node.value.player_ranges[0, card1, card2]
+            p1_reach_prob = node.value.player_ranges[1, card3, card4]
+
+            p0_value = node.value.values[0, card1, card2]
+            p1_value = node.value.values[1, card3, card4]
+
+            print(f"{fill}")
+            print(f"{fill} P0 reach prob = {p0_reach_prob}")
+            print(f"{fill} P1 reach prob = {p1_reach_prob}")
+            print(f"{fill}")
+            print(f"{fill} P0 value = {p0_value}")
+            print(f"{fill} P1 value = {p1_value}")
+            print(f"{fill}") 
 
 #
 # Chance node
@@ -1133,9 +1426,10 @@ class ChanceNode(CFRNode):
     # player's values at the child nodes, weighted by the probability
     # of the outcome.
     #
-    # Returns a list of queries made to the cvfn in the node's subtree
+    # Returns a list of queries made to the cfvn in the node's subtree
     #
-    def update_values(self) -> list[tuple[np.ndarray]]:
+    def update_values(self) -> list[tuple[np.ndarray]]: # NOTE - THIS NEEDS TO BE UPDATED
+                                                        #         QUERY FORMAT HAS CHANGED
         #
         # If this node is not active, 
         # then estimate its values using the cfvn. 
@@ -1146,13 +1440,13 @@ class ChanceNode(CFRNode):
             #
             assert not self.children, "Inactive nodes should not have children"
             #
-            # Convert the nodes information into an input vector for the cvfn
+            # Convert the nodes information into an input vector for the cfvn
             #
-            input = DecisionNode.get_cvfn().to_vect(self.game, self.player_ranges, True)
+            input = DecisionNode.get_cfvn().to_vect(self.game, self.player_ranges, True)
             #
             # Query the network
             #
-            self.values, self.strategy = DecisionNode.get_cvfn().query(input)
+            self.values, self.strategy = DecisionNode.get_cfvn().query(input)
             #
             # Package the input/output of the network into a query tuple
             #
@@ -1168,7 +1462,7 @@ class ChanceNode(CFRNode):
         #
         prob = 1 / len(self.outcomes)
         #
-        # List to store querries to the cvfn made in the subtree
+        # List to store querries to the cfvn made in the subtree
         #
         querries = []
         #
@@ -1335,3 +1629,13 @@ class ChanceNode(CFRNode):
         # Else, the child is not in the game tree and we can recurse.
         #
         return self.children[idx].grow_tree(hands)
+    
+    #
+    # Debug function
+    # 
+    # Activate all nodes using DFS traversal
+    #
+    def activate_full_tree(self):
+        self.activate()
+        for child in self.children.values():
+            child.activate_full_tree()

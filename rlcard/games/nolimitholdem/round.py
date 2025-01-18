@@ -9,10 +9,10 @@ class Action(Enum):
     FOLD = 0
     CHECK_CALL = 1
     #CALL = 2
-    # RAISE_3BB = 3
+    #  RAISE_3BB = 3
     RAISE_HALF_POT = 2
     RAISE_POT = 3
-    # RAISE_2POT = 5
+    RAISE_2POT = 5
     ALL_IN = 4
     # SMALL_BLIND = 7
     # BIG_BLIND = 8
@@ -133,35 +133,79 @@ class NolimitholdemRound:
         Returns:
            (list):  A list of legal actions
         """
-
+        #
+        # Start with a list of all actions
+        #
         full_actions = list(Action)
 
-        # The player can always check or call
+        #
+        # Get the acting player's id
+        #
         player = players[self.game_pointer]
 
+        #
+        # Note: The player can always CHECK or CALL,
+        #       denoted by the fused action CHECK/CALL
+        #
+
+        #
+        # Get the bet size the player is facing
+        #
         diff = max(self.raised) - self.raised[self.game_pointer]
-        # The player cant fold if theyre not facing a bet
+        
+        #
+        # Handle FOLD -
+        #     The player cant fold if theyre not facing a bet
+        #
         if diff == 0:
             full_actions.remove(Action.FOLD)
-        # If the current player has no more chips after call, we cannot raise
+
+        # NOTE - disabling raises for debugging purposes
+        full_actions.remove(Action.RAISE_2POT)
+        full_actions.remove(Action.RAISE_HALF_POT)
+        full_actions.remove(Action.RAISE_POT)
+        if diff >= player.remained_chips:
+            full_actions.remove(Action.ALL_IN)
+        """
+        #
+        # NOTE - The raise rules are not entirely correct according to the
+        #        rules of poker. In order for a raise to be legal it must
+        #        be at least twice as large as the bet faced.
+        # 
+        # Handle raises -
+        #
+        #     Two conditions must be satisfied:
+        #
+        #          1. The player must have enough chips to cover the bet faced.
+        #
+        #          2. The player must have enough chips to cover the raise amount.
+        #
+        #
+        # Condition 1 -
+        #     The player must have enough chips to cover the bet faced.
+        #
         if diff > 0 and diff >= player.remained_chips:
             full_actions.remove(Action.RAISE_HALF_POT)
             full_actions.remove(Action.RAISE_POT)
             full_actions.remove(Action.ALL_IN)
-        # Even if we can raise, we have to check remained chips
+        #
+        # Condition 2 -
+        #     The player must have enough chips to cover the raise amount.
+        #
         else:
+            # Check the pot sized raise
             if self.dealer.pot > player.remained_chips:
                 full_actions.remove(Action.RAISE_POT)
-
+            # Check the half pot raise size
             if int(self.dealer.pot / 2) > player.remained_chips:
                 full_actions.remove(Action.RAISE_HALF_POT)
-
+            
             # Can't raise if the total raise amount is leq than the max raise amount of this round
             # If raise by pot, there is no such concern
             if Action.RAISE_HALF_POT in full_actions and \
                 int(self.dealer.pot / 2) + self.raised[self.game_pointer] <= max(self.raised):
                 full_actions.remove(Action.RAISE_HALF_POT)
-
+        """
         return full_actions
 
     def is_over(self):

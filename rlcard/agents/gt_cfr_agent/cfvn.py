@@ -89,7 +89,8 @@ class CounterfactualValueNetwork:
                        max_replay_buffer_size: int =int(1e6),   # Max replay buffer size 
                        max_grad_updates_per_exmpl: int =10,     # Max times an exmpl can be used in the replay buffer
                        q_recursive: float =0.1,                 # Prob. of adding a recursive query to the query queue
-                       n_query_solvers: int =2):                # Num. of procs solving querries off the query queue
+                       n_query_solvers: int =2,                 # Num. of procs solving querries off the query queue
+                       n_trainers: int =1):                     # Num. of procs performing batched training updates
         #
         # Store training parameters
         #
@@ -212,6 +213,18 @@ class CounterfactualValueNetwork:
         self.max_replay_buffer_size = max_replay_buffer_size
         self.replay_buffer = FIFOBuffer(max_size=max_replay_buffer_size,
                                         evict_after_n_samples=max_grad_updates_per_exmpl)
+        #
+        # Initialize the trainer processes
+        #
+        self.n_trainers = n_trainers
+        self.init_trainers()
+    
+    #
+    # Initialize the process pool for trainers.
+    #
+    def init_trainers(self) -> None:
+        for worker_id in range(self.n_trainers):
+            p = Process(target=self.train, args=(worker_id,))
 
     #
     # Initialize the process pool for query solvers.
@@ -274,11 +287,17 @@ class CounterfactualValueNetwork:
                 #
                 # Solve the query
                 #
+                print(f'Worker Solver #{worker_id} -> Starting solve')
                 target_strat, target_values = self.solvers[worker_id].solve(*query)
+                print(f'Worker Solver #{worker_id} -> Finished solve')
                 #
                 # Place the solved query on the replay buffer
                 #
                 self.replay_buffer.put((query[0].to_vect(), target_strat, target_values))
+                #
+                # Reset the solver game tree after solving
+                #
+                self.solvers[worker_id].root = None
             
             #
             # Output the worker error to the console
@@ -413,6 +432,21 @@ class CounterfactualValueNetwork:
         for player in range(self.num_players):
             np_values[player][idxs] = tf_values[player]
         #
+        # Set strategy and values for invalid hands to zero.
+        # A hand is considered invalid if it contains a public card.
+        #
+        public_card_idxs = np.where(input[:52] == 1)[0]
+        np_values[:, public_card_idxs, :] = 0.
+        np_values[:, :, public_card_idxs] = 0.
+        np_strategy[:, public_card_idxs, :] = 0.
+        np_strategy[:, :, public_card_idxs] = 0.
+        #
+        # Renormalize the strategy matrix
+        #
+        strat_sums = np.sum(np_strategy, axis=0)
+        strat_sums[strat_sums == 0] = 1 # Don't divide by zero
+        np_strategy /= strat_sums
+        #
         # Return the numpy triu matrices as a tuple
         #
         return np_strategy, np_values
@@ -420,8 +454,8 @@ class CounterfactualValueNetwork:
     #
     # Add a query to the query queue for solving
     #
-    def add_to_query_queue(self, query: np.ndarray) -> None:
-        assert query.shape == (self.input_dim,)
+    def add_to_query_queue(self, query: list) -> None:
+        assert len(query) == 4 # [game object, opp. values, player range]
         self.query_queue.put(query)
 
     #
@@ -550,7 +584,11 @@ class CounterfactualValueNetwork:
     #
     # By default, niters -> infinity, training updates run continously.
     #
-    def train(self, niters: int =np.inf, wait_time: int =0):
+    def train(self, worker_id, niters: int =np.inf, wait_time: int =0):
+        #
+        # Log
+        #
+        print(f'Worker Trainer #{worker_id}')
         #
         # Track the number of updates we perform
         #
