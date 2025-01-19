@@ -13,7 +13,7 @@ from rlcard.games.base import Card
 #
 # Training parameters
 #
-num_episodes = 1
+num_episodes = 10
 
 #
 # Initialize nolimit holdem environment
@@ -41,9 +41,12 @@ agent = GTCFRAgent(env)
 # Run self-play training episodes
 #
 try:
+
     for episode in range(num_episodes):
-        print(f'Episode {episode + 1}')
+        print('=====================================================')
+        print(f'--> Episode {episode + 1}')
         agent.self_play()
+
 except Exception as e:
     print(e)
     import ipdb; ipdb.post_mortem()

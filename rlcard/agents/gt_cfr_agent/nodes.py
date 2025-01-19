@@ -767,7 +767,9 @@ class DecisionNode(CFRNode):
             pstr += str(Action(history[-1]))
             pstr += ' Decision Node'
             print(pstr)
+        """
         card1, card2 = self.game.players[pid].hand[0].to_int(), self.game.players[pid].hand[1].to_int()
+        """
         print([str(card) for card in self.game.public_cards], f' Pot: {self.game.dealer.pot}')
         print(f'Player {pid} {tuple(str(card) for card in self.game.players[pid].hand)}')
         """
@@ -791,7 +793,7 @@ class DecisionNode(CFRNode):
             #
             # Perform the regret update for this node
             #
-            self.regrets[action_idx] = np.max(self.regrets[action_idx] + child.values[pid] - self.values[pid], 0)
+            self.regrets[action_idx] = np.maximum(self.regrets[action_idx] + child.values[pid] - self.values[pid], 0)
         #
         # Update the acting player's strategy according to the new regrets
         #
@@ -1205,7 +1207,7 @@ class DecisionNode(CFRNode):
         #
         # i.e. the root state's trajectory must be a subset of the search trajectory
         #
-        if trajectory[:n] != self.root.game.trajectory:
+        if trajectory[:n] != self.game.trajectory:
             raise ValueError("The given search trajectory is not in the game tree")
         #
         # Initialize search variables
@@ -1222,17 +1224,16 @@ class DecisionNode(CFRNode):
             #
             if depth == len(trajectory):
                 assert trajectory == node.game.trajectory, "Node game state and trajectory mismatch"
-                assert isinstance(node, DecisionNode), "Given trajectories must correspond to decision nodes"
-                assert node.game.game_pointer == pid, "Given trajectories must correspond to decision nodes with the expected acting player"
+                assert isinstance(node, DecisionNode), "The given trajectory must correspond to a decision node"
                 return node
             #
             # Continue searching
             #
             prev_node = node
             if isinstance(node, DecisionNode):
-                node = node.children[trajectory[depth]]
+                node = node.children[Action(trajectory[depth])]
             else:
-                node = node.outcomes[trajectory[depth]]
+                node = node.children[trajectory[depth]]
             depth += 1
         #
         # Not found case - The search path hit the bottom of the game tree without finding

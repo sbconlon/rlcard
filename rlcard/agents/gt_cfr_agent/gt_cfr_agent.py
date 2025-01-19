@@ -156,7 +156,7 @@ class GTCFRSolver():
     # NOTE - How does the gadget game change in the >2 player game setting. 
     #
     def init_gadget_game(self, input_game: NolimitholdemGame, input_opponents_values: np.ndarray =None):
-        if input_opponents_values:
+        if input_opponents_values is not None:
             self.terminate_values = input_opponents_values
         else:
             self.terminate_values = starting_hand_values(input_game) # = t_values = v_2 in the literature
@@ -302,6 +302,9 @@ class GTCFRSolver():
             # The root node is the decision node we are solving
             #
             self.trajectory_seed = []
+            
+            # DEBUG - Activate the full game tree for debugging purpuses
+            self.root.activate_full_tree()
         #
         # Case 2 - Existing game tree. No input player range or opponent values.
         #
@@ -323,7 +326,7 @@ class GTCFRSolver():
             # NOTE - For now, the gadget game is only defined for a 2 player game.
             #
             pid = input_game.game_pointer
-            self.init_gadget_game(input_game, opponents_values=np.copy(self.root.values[(pid+1) % 2]))
+            self.init_gadget_game(input_game, input_opponents_values=np.copy(self.root.values[(pid+1) % 2]))
             #
             # Reset values to zero for the players
             #
@@ -351,7 +354,7 @@ class GTCFRSolver():
             #
             # Initialize the gadget game with the opponent's values
             #
-            self.init_gadget_game(input_game, opponents_values=input_opponent_values)
+            self.init_gadget_game(input_game, input_opponents_values=input_opponent_values)
             #
             # Set the trajectory seed
             #
@@ -370,8 +373,6 @@ class GTCFRSolver():
         #
         CFRNode.set_cfvn(self.cfvn)
         
-        # NOTE - Activate the full game tree for debugging purpuses
-        self.root.activate_full_tree()
         self.decision_point = self.root
         
         """
@@ -578,7 +579,8 @@ class GTCFRSolver():
         # Each iteration computes the values of each node in the public state tree,
         # then adds a new leaf node to the tree.
         #
-        for i in range(self.n_expansions):
+        #for i in range(self.n_expansions):
+        for i in range(1):
             #print(f'--> GT-CFR loop {i}')
             #
             # Run cfr to update the policy and regret estimates 
@@ -605,7 +607,6 @@ class GTCFRSolver():
         # Run gt-cfr
         #
         self.gt_cfr(train=True)
-
 
     #
     # Return a policy and value estimate for the given game state using gt-cfr
@@ -650,11 +651,6 @@ class GTCFRAgent():
         # Cap the number of moves that can be made in a self play episode
         #
         self.max_moves = np.inf # disabled by default
-
-        #
-        # Minimum counterfactual value to continue solving
-        #
-        self.resign_threshold = 0 # disabled by default
 
         #
         # Exploration parameter
@@ -726,25 +722,17 @@ class GTCFRAgent():
             hand_idxs = sorted([card.to_int() for card in player_hand])
             ev = cfr_values[pid, hand_idxs[0], hand_idxs[1]]
             cfr_policy = cfr_policies[:, hand_idxs[0], hand_idxs[1]]
-            print('===============================')
             print(f'Board = {str([str(c) for c in self.env.game.public_cards])}')
             print(f'Pot = {self.env.game.dealer.pot}')
             print()
-            print(f'Player {pid} - hand = ({str(player_hand[0])}, {str(player_hand[1])})')
+            print(f'Player {pid} ({str(player_hand[0])}, {str(player_hand[1])})')
             print()
-            print(f'Expected value - {ev}')
+            print(f'Expected value {ev}')
             print()
             print(f'CFR Strategy:')
             for i, action in enumerate(legal_actions):
                 print(f'    {action} =  {round(cfr_policy[i], 3)}')
             print()
-            
-            
-            #
-            # Dont waste compute on already decided games
-            #
-            if ev < self.resign_threshold: # disabled by default
-                return
             
             #
             # Mix the controller's policy with a uniform prior to encourage
@@ -767,6 +755,7 @@ class GTCFRAgent():
                 action = legal_actions[np.argmax(mixed_policy)]
 
             print(f'Action: {action}')
+            print()
             
             #
             # Take action
