@@ -626,7 +626,7 @@ class GTCFRSolver():
         #
         # Return the computed strategies and values for the root node
         #
-        return np.copy(self.decision_point.strategy), np.copy(self.decision_point.values)
+        return np.copy(self.decision_point.cummulative_strategy()), np.copy(self.decision_point.values)
 
 #
 # This function handles the self-play loop that uses the GT-CFR solver 
@@ -700,6 +700,7 @@ class GTCFRAgent():
             state = self.env.get_state(pid)
             legal_actions = self.env.game.get_legal_actions()
             player_hand = self.env.game.players[pid].hand
+            player_stack = self.env.game.players[pid].remained_chips
 
             #
             # Use GT-CFR to solve for the following:
@@ -725,11 +726,11 @@ class GTCFRAgent():
             print(f'Board = {str([str(c) for c in self.env.game.public_cards])}')
             print(f'Pot = {self.env.game.dealer.pot}')
             print()
-            print(f'Player {pid} ({str(player_hand[0])}, {str(player_hand[1])})')
+            print(f'Player {pid} ({str(player_hand[0])}, {str(player_hand[1])}) {player_stack} bb')
             print()
             print(f'Expected value {ev}')
             print()
-            print(f'CFR Strategy:')
+            print(f'Strategy:')
             for i, action in enumerate(legal_actions):
                 print(f'    {action} =  {round(cfr_policy[i], 3)}')
             print()
@@ -740,11 +741,6 @@ class GTCFRAgent():
             #
             uniform_policy = np.ones(cfr_policy.shape) / cfr_policy.shape[0]
             mixed_policy = (1-self.epsilon) * cfr_policy + self.epsilon * uniform_policy
-
-            print(f'Mixed Strategy:')
-            for i, action in enumerate(legal_actions):
-                print(f'    {action} =  {round(cfr_policy[i], 3)}')
-            print()
 
             #
             # Select an action

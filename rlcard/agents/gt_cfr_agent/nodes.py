@@ -711,6 +711,8 @@ class DecisionNode(CFRNode):
         # Start with an array of random values
         #
         self.strategy = np.random.rand(len(self.actions), 52, 52)
+        self.accumulate_strategy = np.random.rand(len(self.actions), 52, 52) # sum of all strategies
+        self.n_strategy_updates = 0 # number of strategy updates
 
         #
         # Set duplicate card pairs to zero.
@@ -741,6 +743,16 @@ class DecisionNode(CFRNode):
         # Represented as an upper triangular matrix with zeros along the diagonal.
         #
         self.regrets  = np.zeros((len(self.actions), 52, 52))
+    
+    #
+    # Return the average strategy across strategy updates
+    #
+    def cummulative_strategy(self):
+        cum_strategy = self.accumulate_strategy / self.n_strategy_updates
+        # Renormalize
+        denom = cum_strategy.sum(axis=0, keepdims=True)
+        denom[denom == 0] = 1
+        return cum_strategy / denom
 
     #
     # Updates the player's regrets and strategies 
@@ -813,6 +825,12 @@ class DecisionNode(CFRNode):
         for cid in public_card_idxs:
             self.strategy[:, cid, :] = 0.
             self.strategy[:, :, cid] = 0.
+        #
+        # Update cummulative strategy parameters
+        #
+        self.n_strategy_updates += 1
+        self.accumulate_strategy += self.strategy
+
         """
         print(f'Value = {self.values[pid, card1, card2]}')
         print(f'Child values = {str({self.actions[i]: self.values[pid, card1, card2] for i in range(len(self.actions))})}')
