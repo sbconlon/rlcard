@@ -88,6 +88,11 @@ class NolimitholdemRound:
             player.bet(chips=all_in_quantity)
 
             self.not_raise_num = 1
+        
+        elif action == Action.RAISE_2POT:
+            self.raised[self.game_pointer] += 2*self.dealer.pot
+            player.bet(chips=2*self.dealer.pot)
+            self.not_raise_num = 1
 
         elif action == Action.RAISE_POT:
             self.raised[self.game_pointer] += self.dealer.pot
@@ -102,6 +107,9 @@ class NolimitholdemRound:
 
         elif action == Action.FOLD:
             player.status = PlayerStatus.FOLDED
+        
+        else:
+            raise ValueError(f'Action not recognized: {action}')
 
         if player.remained_chips < 0:
             raise Exception("Player in negative stake")
@@ -160,12 +168,15 @@ class NolimitholdemRound:
         if diff == 0:
             full_actions.remove(Action.FOLD)
 
-        # NOTE - disabling raises for debugging purposes
-        full_actions.remove(Action.RAISE_2POT)
+        # DEBUG - reduced set of available actions
         full_actions.remove(Action.RAISE_HALF_POT)
         full_actions.remove(Action.RAISE_POT)
-        if diff >= player.remained_chips:
+        if diff > 0 and diff >= player.remained_chips:
+            full_actions.remove(Action.RAISE_2POT)
             full_actions.remove(Action.ALL_IN)
+        elif diff != 0 or player.remained_chips < 2 * self.dealer.pot:
+            full_actions.remove(Action.RAISE_2POT)
+        
         """
         #
         # NOTE - The raise rules are not entirely correct according to the

@@ -28,7 +28,7 @@ config = {
                                 ],
 
           'starting_stage': 'river',
-          'chips_for_each': 10
+          'chips_for_each': 50
 }
 env = rlcard.make('no-limit-holdem', config=config)
 
