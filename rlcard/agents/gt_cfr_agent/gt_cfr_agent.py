@@ -488,8 +488,8 @@ class GTCFRSolver():
             #
             # Perform one iteration of value and strategy updates on the game tree
             #
-            #self.root.print_tree()
-            #import ipdb; ipdb.set_trace()
+            self.root.print_tree()
+            import ipdb; ipdb.set_trace()
             querries = self.root.update_values()
             #
             # Fully solve a subset of cvpn queries from this cfr update
@@ -723,8 +723,8 @@ class GTCFRAgent():
             hand_idxs = sorted([card.to_int() for card in player_hand])
             ev = cfr_values[pid, hand_idxs[0], hand_idxs[1]]
             cfr_policy = cfr_policies[:, hand_idxs[0], hand_idxs[1]]
-            print(f'Board = {str([str(c) for c in self.env.game.public_cards])}')
-            print(f'Pot = {self.env.game.dealer.pot}')
+            print(f'Board {str([str(c) for c in self.env.game.public_cards])}')
+            print(f'Pot {self.env.game.dealer.pot}')
             print()
             print(f'Player {pid} ({str(player_hand[0])}, {str(player_hand[1])}) {player_stack} bb')
             print()

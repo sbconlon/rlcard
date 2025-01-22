@@ -25,10 +25,17 @@ class Stage(Enum):
 
 
 class NolimitholdemGame(Game):
-    def __init__(self, allow_step_back=False, num_players=2, fixed_public_cards=[], fixed_player_cards={}, starting_stage=Stage.PREFLOP):
+    def __init__(self, allow_step_back=False, 
+                       num_players=2, 
+                       fixed_public_cards=[], 
+                       fixed_player_cards={}, 
+                       starting_stage=Stage.PREFLOP,
+                       disabled_actions=None
+    ):
         """Initialize the class no limit holdem Game"""
         super().__init__(allow_step_back, num_players)
         self.np_random = np.random.RandomState()
+        self.disabled_actions = disabled_actions if disabled_actions is not None else set()
 
         # small blind and big blind
         self.small_blind = 1
@@ -225,7 +232,7 @@ class NolimitholdemGame(Game):
 
         # Initialize a bidding round, in the first round, the big blind and the small blind needs to
         # be passed to the round for processing.
-        self.round = Round(self.num_players, self.big_blind, dealer=self.dealer, np_random=self.np_random)
+        self.round = Round(self.num_players, self.big_blind, dealer=self.dealer, np_random=self.np_random, disabled_actions=self.disabled_actions)
 
         self.round.start_new_round(game_pointer=self.game_pointer, raised=[p.in_chips for p in self.players])
 
@@ -237,7 +244,13 @@ class NolimitholdemGame(Game):
 
         # Advance the game to the given fixed starting stage
         while self.stage != self.starting_stage:
-            self.step(Action.CHECK_CALL)
+            actions = self.get_legal_actions() # Always contains CHECK or CALL
+            if Action.CHECK in actions:
+                self.step(Action.CHECK)
+            elif Action.CALL in actions:
+                self.step(Action.CALL)
+            else:
+                raise ValueError("We should always be able to check or call")
 
         state = self.get_state(self.game_pointer)
 

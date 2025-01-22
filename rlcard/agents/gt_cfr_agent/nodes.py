@@ -1328,7 +1328,7 @@ class DecisionNode(CFRNode):
                     strat = parent.value.strategy[action, card3, card4]
                     regret = parent.value.regrets[action, card3, card4]
                 
-                print(f"{pre} ({node.name} : strat = {strat}, regret = {regret})")
+                print(f"{pre} ({Action(node.name)} : strat = {strat}, regret = {regret})")
                 print(f"{fill}")
                 
                 if isinstance(node.value, DecisionNode):

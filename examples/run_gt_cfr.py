@@ -13,7 +13,7 @@ from rlcard.games.base import Card
 #
 # Training parameters
 #
-num_episodes = 10
+num_episodes = 25
 
 #
 # Initialize nolimit holdem environment
@@ -27,8 +27,8 @@ config = {
                                     Card('H', '8')
                                 ],
 
-          'starting_stage': 'river',
-          'chips_for_each': 50
+            'starting_stage': 'river',
+            'chips_for_each': 50
 }
 env = rlcard.make('no-limit-holdem', config=config)
 
@@ -44,7 +44,9 @@ try:
 
     for episode in range(num_episodes):
         print('=====================================================')
+        print()
         print(f'--> Episode {episode + 1}')
+        print()
         agent.self_play()
 
 except Exception as e:

@@ -4,24 +4,59 @@ from enum import Enum
 
 from rlcard.games.limitholdem import PlayerStatus
 
-
 class Action(Enum):
+    # DEFAULT ACTIONS
     FOLD = 0
-    CHECK_CALL = 1
-    #CALL = 2
-    #  RAISE_3BB = 3
-    RAISE_HALF_POT = 2
-    RAISE_POT = 3
-    RAISE_2POT = 5
-    ALL_IN = 4
-    # SMALL_BLIND = 7
-    # BIG_BLIND = 8
+    CHECK = 1
+    CALL = 2
+    ALL_IN = 3
+    # BET ACTIONS
+    BET_HALF_POT = 4
+    BET_POT = 5
+    BET_2POT = 6
+    BET_5POT = 7
+    # RAISE ACTIONS
+    RAISE_2X = 8
+    RAISE_3X = 9
+    RAISE_5X = 10
 
+default_actions_set = {
+    Action.FOLD, 
+    Action.CHECK, 
+    Action.CALL, 
+    Action.ALL_IN
+}
+
+bet_actions_set = {
+    Action.BET_HALF_POT, 
+    Action.BET_POT, 
+    Action.BET_2POT,
+    Action.BET_5POT
+}
+
+bet_actions_multipliers = {
+    Action.BET_HALF_POT: 0.5, 
+    Action.BET_POT: 1, 
+    Action.BET_2POT: 2,
+    Action.BET_5POT: 5
+}
+
+raise_actions_set = {
+    Action.RAISE_2X,
+    Action.RAISE_3X,
+    Action.RAISE_5X
+}
+
+raise_actions_multipliers = {
+    Action.RAISE_2X: 2,
+    Action.RAISE_3X: 3,
+    Action.RAISE_5X: 5
+}
 
 class NolimitholdemRound:
     """Round can call functions from other classes to keep the game running"""
 
-    def __init__(self, num_players, init_raise_amount, dealer, np_random):
+    def __init__(self, num_players, init_raise_amount, dealer, np_random, disabled_actions=None):
         """
         Initialize the round class
 
@@ -33,6 +68,7 @@ class NolimitholdemRound:
         self.game_pointer = None
         self.num_players = num_players
         self.init_raise_amount = init_raise_amount
+        self.disabled_actions = disabled_actions if disabled_actions is not None else set()
 
         self.dealer = dealer
 
@@ -74,58 +110,85 @@ class NolimitholdemRound:
         Returns:
             (int): The game_pointer that indicates the next player
         """
+        #
+        # Acting player
         player = players[self.game_pointer]
-
-        if action == Action.CHECK_CALL:
-            diff = max(self.raised) - self.raised[self.game_pointer]
+        
+        #
+        # Price for the player to continue to the next round
+        diff = max(self.raised) - self.raised[self.game_pointer]
+        
+        #
+        # Proceed depending on the given action type
+        #
+        # --> Base Actions
+        # 
+        # Action.FOLD = 0
+        if action == Action.FOLD:
+            player.status = PlayerStatus.FOLDED
+        #
+        # Action.CHECK = 1
+        elif action == Action.CHECK:
+            assert diff == 0, "Can't check when facing a bet"
+            self.not_raise_num += 1
+        #
+        # Action.CALL = 2
+        elif action == Action.CALL:
+            assert diff != 0, "Can't call when not facing a bet"
             self.raised[self.game_pointer] = max(self.raised)
             player.bet(chips=diff)
             self.not_raise_num += 1
-
+        #
+        # Action.ALL_IN = 3
         elif action == Action.ALL_IN:
             all_in_quantity = player.remained_chips
-            self.raised[self.game_pointer] = all_in_quantity + self.raised[self.game_pointer]
+            self.raised[self.game_pointer] += all_in_quantity
             player.bet(chips=all_in_quantity)
-
             self.not_raise_num = 1
-        
-        elif action == Action.RAISE_2POT:
-            self.raised[self.game_pointer] += 2*self.dealer.pot
-            player.bet(chips=2*self.dealer.pot)
+        #
+        # --> Bet Actions
+        #
+        elif action in bet_actions_set:
+            assert all([r == 0 for r in self.raised]), "Can't bet when already facing a bet"
+            bet_size = int(bet_actions_multipliers[action] * self.dealer.pot)
+            self.raised[self.game_pointer] = bet_size
+            player.bet(chips=bet_size)
             self.not_raise_num = 1
-
-        elif action == Action.RAISE_POT:
-            self.raised[self.game_pointer] += self.dealer.pot
-            player.bet(chips=self.dealer.pot)
+        #
+        # --> Raise Actions
+        #
+        elif action in raise_actions_set:
+            assert diff != 0, "Can't raise when not facing a bet"
+            bet_size = int(raise_actions_multipliers[action] * self.dealer.pot) - self.raised[self.game_pointer]
+            self.raised[self.game_pointer] += bet_size
+            player.bet(chips=bet_size)
             self.not_raise_num = 1
-
-        elif action == Action.RAISE_HALF_POT:
-            quantity = int(self.dealer.pot / 2)
-            self.raised[self.game_pointer] += quantity
-            player.bet(chips=quantity)
-            self.not_raise_num = 1
-
-        elif action == Action.FOLD:
-            player.status = PlayerStatus.FOLDED
-        
+        #
+        # Error condition
         else:
             raise ValueError(f'Action not recognized: {action}')
 
+        #
+        # Check player chips
         if player.remained_chips < 0:
             raise Exception("Player in negative stake")
 
+        #
+        # Update player's status if they went all-in
         if player.remained_chips == 0 and player.status != PlayerStatus.FOLDED:
             player.status = PlayerStatus.ALLIN
 
-        self.game_pointer = (self.game_pointer + 1) % self.num_players
-
+        #
+        # Update counts based on player status
         if player.status == PlayerStatus.ALLIN:
             self.not_playing_num += 1
             self.not_raise_num -= 1  # Because already counted in not_playing_num
-        if player.status == PlayerStatus.FOLDED:
+        elif player.status == PlayerStatus.FOLDED:
             self.not_playing_num += 1
 
-        # Skip the folded players
+        #
+        # Advance game pointer to the next player, skipping folded players
+        self.game_pointer = (self.game_pointer + 1) % self.num_players
         while players[self.game_pointer].status == PlayerStatus.FOLDED:
             self.game_pointer = (self.game_pointer + 1) % self.num_players
 
@@ -144,7 +207,7 @@ class NolimitholdemRound:
         #
         # Start with a list of all actions
         #
-        full_actions = list(Action)
+        legal_actions = set()
 
         #
         # Get the acting player's id
@@ -152,72 +215,46 @@ class NolimitholdemRound:
         player = players[self.game_pointer]
 
         #
-        # Note: The player can always CHECK or CALL,
-        #       denoted by the fused action CHECK/CALL
-        #
-
-        #
         # Get the bet size the player is facing
         #
         diff = max(self.raised) - self.raised[self.game_pointer]
-        
+
         #
-        # Handle FOLD -
-        #     The player cant fold if theyre not facing a bet
+        # Case 1 - Not facing a bet
         #
         if diff == 0:
-            full_actions.remove(Action.FOLD)
-
-        # DEBUG - reduced set of available actions
-        full_actions.remove(Action.RAISE_HALF_POT)
-        full_actions.remove(Action.RAISE_POT)
-        if diff > 0 and diff >= player.remained_chips:
-            full_actions.remove(Action.RAISE_2POT)
-            full_actions.remove(Action.ALL_IN)
-        elif diff != 0 or player.remained_chips < 2 * self.dealer.pot:
-            full_actions.remove(Action.RAISE_2POT)
-        
-        """
+            #
+            # Add legal default actions
+            legal_actions.add(Action.CHECK)
+            legal_actions.add(Action.ALL_IN)
+            #
+            # Add legal bet actions
+            for action, multiplier in bet_actions_multipliers.items():
+                if (player.remained_chips > multiplier * self.dealer.pot): # Player has enough chips
+                    legal_actions.add(action)
         #
-        # NOTE - The raise rules are not entirely correct according to the
-        #        rules of poker. In order for a raise to be legal it must
-        #        be at least twice as large as the bet faced.
-        # 
-        # Handle raises -
-        #
-        #     Two conditions must be satisfied:
-        #
-        #          1. The player must have enough chips to cover the bet faced.
-        #
-        #          2. The player must have enough chips to cover the raise amount.
-        #
-        #
-        # Condition 1 -
-        #     The player must have enough chips to cover the bet faced.
-        #
-        if diff > 0 and diff >= player.remained_chips:
-            full_actions.remove(Action.RAISE_HALF_POT)
-            full_actions.remove(Action.RAISE_POT)
-            full_actions.remove(Action.ALL_IN)
-        #
-        # Condition 2 -
-        #     The player must have enough chips to cover the raise amount.
+        # Case 2 - Facing a bet
         #
         else:
-            # Check the pot sized raise
-            if self.dealer.pot > player.remained_chips:
-                full_actions.remove(Action.RAISE_POT)
-            # Check the half pot raise size
-            if int(self.dealer.pot / 2) > player.remained_chips:
-                full_actions.remove(Action.RAISE_HALF_POT)
-            
-            # Can't raise if the total raise amount is leq than the max raise amount of this round
-            # If raise by pot, there is no such concern
-            if Action.RAISE_HALF_POT in full_actions and \
-                int(self.dealer.pot / 2) + self.raised[self.game_pointer] <= max(self.raised):
-                full_actions.remove(Action.RAISE_HALF_POT)
-        """
-        return full_actions
+            #
+            # Add legal default actions
+            legal_actions.add(Action.FOLD)   # The player can always fold
+            legal_actions.add(Action.CALL)   # The player can always call
+            if player.remained_chips > diff: # The player can go all-in if they have enough chips
+                legal_actions.add(Action.ALL_IN)
+            #
+            # Add legal raise actions
+            for action, multiplier in raise_actions_multipliers.items():
+                if (player.remained_chips > multiplier * diff): # Player has enough chips
+                    legal_actions.add(action)
+
+        #
+        # Remove disabled actions
+        #
+        legal_actions -= self.disabled_actions
+
+        return sorted(list(legal_actions), key=lambda a: a.value) # Legacy functions expect a list type
+                                                                  # Sort for readability
 
     def is_over(self):
         """
