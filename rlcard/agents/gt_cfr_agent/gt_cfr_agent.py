@@ -159,7 +159,7 @@ class GTCFRSolver():
         if input_opponents_values is not None:
             self.terminate_values = input_opponents_values
         else:
-            self.terminate_values = starting_hand_values(input_game) # = t_values = v_2 in the literature
+            self.terminate_values = starting_hand_values(input_game) * input_game.dealer.pot # = t_values = v_2 in the literature
         self.gadget_regrets = np.zeros((2, 52, 52)) # 2 gadget actions, (Follow, Terminate)
         self.gadget_values = np.zeros((52, 52))
     
@@ -279,13 +279,13 @@ class GTCFRSolver():
             #
             # The opponent players' ranges are randomized during node initialization.
             #
-            #player_range = uniform_range(input_game.public_cards)
-            #player_ranges = GTCFRSolver.compute_initial_ranges(input_game, player_range)
+            player_range = uniform_range(input_game.public_cards)
+            player_ranges = GTCFRSolver.compute_initial_ranges(input_game, player_range)
             
             # NOTE - DEBUG
-            player_ranges = np.zeros((2, 52, 52))
-            player_ranges[0] = uniform_range(input_game.public_cards)
-            player_ranges[1] = uniform_range(input_game.public_cards)
+            #player_ranges = np.zeros((2, 52, 52))
+            #player_ranges[0] = uniform_range(input_game.public_cards)
+            #player_ranges[1] = uniform_range(input_game.public_cards)
             
             #
             # Initialize the root node of the public game tree
@@ -413,6 +413,15 @@ class GTCFRSolver():
     # NOTE - implement this function for >2 player games, shouldn't be too hard
     #
     def update_gadget_regrets(self):
+        
+        """
+        # DEBUG
+        print('---')
+        opp_pid = (self.root.game.game_pointer + 1) % 2
+        card1, card2 = sorted(card.to_int() for card in self.root.game.players[opp_pid].hand)
+        #print([str(card) for card in self.root.game.players[opp_pid].hand])
+        """
+
         #
         # Compute the gadget strategy using the gadget regrets
         #
@@ -425,10 +434,34 @@ class GTCFRSolver():
         # Note 2: Let, self.gadget_regret[0] be the Follow    action regrets
         #         and, self.gadget_regret[1] be the Terminate action regrets
         #
-        gadget_regrets_positives = np.maximum(self.gadget_regrets, 0)
+        gadget_regrets_positives = np.maximum(self.gadget_regrets, 0) # Should already be non-negative
+
+        """
+        # DEBUG
+        print()
+        print(f'Regrets - Follow: {gadget_regrets_positives[0, card1, card2]}  Terminate: {gadget_regrets_positives[1, card1, card2]}')
+        print(f'Value  -  {self.gadget_values[card1, card2]}')
+        """
+
         denom = gadget_regrets_positives[0] + gadget_regrets_positives[1]
         safe_denom = np.where(denom == 0, 1, denom) # remove zeros from denom to avoid dividing by zero
         gadget_follow_strat = np.where(denom == 0, 0.5, gadget_regrets_positives[0] / safe_denom)
+
+        # DEBUG
+        #print(f'Follow strat - {gadget_follow_strat[card1, card2]}')
+
+        #
+        # In the above line, we assign 50-50 probability to hands with zero in the denominator.
+        # This works for valid hands, but has the side effect of giving invalid hands non-zero
+        # reach probabilities.
+        #
+        # Mask out invalid hands
+        #
+        public_card_idxs = [c.to_int() for c in self.root.game.public_cards]
+        for idx in public_card_idxs:
+            gadget_follow_strat[:, idx] = 0.
+            gadget_follow_strat[idx, :] = 0.
+
 
         #
         # Set the opponent's range in the cfr root node to the gadget's follow strategy 
@@ -436,18 +469,50 @@ class GTCFRSolver():
         # Reasoning:
         #     Gadget follow strat = probability of choosing to play toward the cfr root state
         #     Opp. root range = prob. of the opp. reaching this state given her strategy
-        #     Therefore, gadget follow strat = opponent's range at the root node. 
+        #     Therefore, gadget follow strat = opponent's range at the root node.
+        #
+        # Normalize the opponent's reach probibility.
+        #
+        # Note 1 - while this step is not included in deepstack's pseudocode,
+        #          I think it fits the reasoning of the gadget game - the initial
+        #          state of the sub game can be thought of as the start of a game
+        #          where the two player's are dealt cards from a weighted deck.
+        #          Using this reasoning, the follow strat should be normalized.
+        #
+        # Note 2 - I came to this conclusion after noticing the expected values
+        #          blow up because we are giving a 1.0 reach probability for the
+        #          opponent for good hands and 0.0 reach probability for bad hands.
+        #          When this is propagated down to terminal nodes, it leads to
+        #          expected values greater than the total number of chips in the game.
+        #
+        # Note 3 - I don't think multiplying all reach probabilities by a constant
+        #          will affect the output strategy.
+        #
+        # Note 4 - Bayes' perspective:
+        #          Un-normalized = prob opp. player reaches the root state given they have the hand (i, j)
+        #          Normalized    = prob opp. player reaches the root state and has the hand (i, j)
         #
         opp_pid = (self.root.game.game_pointer + 1) % 2
-        self.root.player_ranges[opp_pid] = gadget_follow_strat
+        self.root.player_ranges[opp_pid] = gadget_follow_strat / np.sum(gadget_follow_strat)
 
         #
         # Compute the updated gadget values
         #
         # This is a standard expected value computation.
         #
-        new_gadget_values = (gadget_follow_strat * self.gadget_values[0] + 
-                             (1 - gadget_follow_strat) * self.gadget_values[1])
+        new_gadget_values = (gadget_follow_strat * self.root.values[opp_pid] + 
+                             (1 - gadget_follow_strat) * self.terminate_values)
+
+        """
+        # DEBUG
+        print()
+        print(f'New value - follow strat * root value + (1 - follow strat) * terminate value = {gadget_follow_strat[card1, card2]} * {self.root.values[opp_pid, card1, card2]} + {1 - gadget_follow_strat[card1, card2]} * {self.terminate_values[card1, card2]} = {new_gadget_values[card1, card2]}')
+
+        # DEBUG
+        print()
+        print(f'Follow regret update = max(regret + node value - new gadget value, 0) = max({self.gadget_regrets[0, card1, card2]} + {self.root.values[opp_pid, card1, card2]} - {new_gadget_values[card1, card2]}, 0) = {np.maximum(self.gadget_regrets[0]  + self.root.values[opp_pid] - new_gadget_values, 0)[card1, card2]}')
+        print(f'Terminate regret update = max(regret + terminate value - gadget value, 0) = max({self.gadget_regrets[1, card1, card2]} + {self.terminate_values[card1, card2]} - {self.gadget_values[card1, card2]}, 0) = {np.maximum(self.gadget_regrets[1] + self.terminate_values     - self.gadget_values, 0)[card1, card2]}')
+        """
 
         #
         # Update the gadget regrets
@@ -464,15 +529,18 @@ class GTCFRSolver():
         #    - Always selecting Follow    yields a fixed payoff equal to the opp. cfr values at the root node
         #    - Always selecting Terminate yields a fixed payoff equal to the terminate values
         #
-        self.gadget_regrets[0] += self.root.values[opp_pid] - new_gadget_values[0] # gadget value @ t
-        self.gadget_regrets[1] += self.terminate_values - self.gadget_values[1] # gadget value @ t + 1
+        self.gadget_regrets[0] = np.maximum(self.gadget_regrets[0] + self.root.values[opp_pid] - new_gadget_values, 0) # gadget value @ t
+        self.gadget_regrets[1] = np.maximum(self.gadget_regrets[1] + self.terminate_values - self.gadget_values, 0)    # gadget value @ t + 1
 
         #
         # Update the gadget values to the new values
         #
         self.gadget_values = new_gadget_values
         
-        #print({'Follow Regret': self.gadget_values[0], 'Terminate Regret': self.gadget_values[1]})
+        """
+        # DEBUG
+        import ipdb; ipdb.set_trace()
+        """
 
     #
     # Public tree counterfactual regret minimization.
@@ -484,12 +552,15 @@ class GTCFRSolver():
         #
         # Run for a fixed number of value updates on the tree.
         #
-        for _ in range(math.ceil(1/self.n_expansions_per_regret_updates)):
+        for i in range(math.ceil(1/self.n_expansions_per_regret_updates)):
+            """print(f'{i} / {math.ceil(1/self.n_expansions_per_regret_updates)}')"""
             #
             # Perform one iteration of value and strategy updates on the game tree
             #
+            """
             self.root.print_tree()
             import ipdb; ipdb.set_trace()
+            """
             querries = self.root.update_values()
             #
             # Fully solve a subset of cvpn queries from this cfr update
@@ -501,9 +572,11 @@ class GTCFRSolver():
             #
             # Update gadget regrets
             #
-            #self.update_gadget_regrets() # DEBUG
-        #print(self.root.print_tree())
-        #import ipdb; ipdb.set_trace()
+            self.update_gadget_regrets()
+        """
+        print(self.root.print_tree())
+        import ipdb; ipdb.set_trace()
+        """
 
     #
     # Add a node to the game tree
@@ -627,6 +700,13 @@ class GTCFRSolver():
         # Return the computed strategies and values for the root node
         #
         return np.copy(self.decision_point.cummulative_strategy()), np.copy(self.decision_point.values)
+    
+    #
+    # Reset
+    #
+    def reset(self) -> None:
+        # Remove the game tree
+        self.root, self.decision_point = None, None
 
 #
 # This function handles the self-play loop that uses the GT-CFR solver 
@@ -668,12 +748,23 @@ class GTCFRAgent():
         #
         self.prob_add_to_buffer = 0 # called 'p_td1' in the literature
                                     # disabled by default
+
+    #
+    # Reset the solver's state
+    #
+    def reset(self) -> None:
+        self.solver.reset()
     
     #
     # Play through one hand of poker using gt-cfr to estimate
     # policies and values.
     #
-    def self_play(self):
+    def self_play(self) -> None:
+        #
+        # Start with a fresh solver game tree
+        #
+        self.solver.reset()
+
         #
         # Start from the beggining of the game
         #
@@ -771,3 +862,4 @@ class GTCFRAgent():
             for token in trajectory: 
                 if random.random() < self.prob_add_to_buffer:
                     self.solver.cfvn.add_to_replay_buffer(token)
+

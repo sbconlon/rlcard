@@ -68,6 +68,8 @@ class NolimitholdemRound:
         self.game_pointer = None
         self.num_players = num_players
         self.init_raise_amount = init_raise_amount
+
+        # Exclude these actions from the set of legal actions
         self.disabled_actions = disabled_actions if disabled_actions is not None else set()
 
         self.dealer = dealer
@@ -149,7 +151,7 @@ class NolimitholdemRound:
         # --> Bet Actions
         #
         elif action in bet_actions_set:
-            assert all([r == 0 for r in self.raised]), "Can't bet when already facing a bet"
+            assert diff == 0, "Can't bet when already facing a bet"
             bet_size = int(bet_actions_multipliers[action] * self.dealer.pot)
             self.raised[self.game_pointer] = bet_size
             player.bet(chips=bet_size)
@@ -159,7 +161,7 @@ class NolimitholdemRound:
         #
         elif action in raise_actions_set:
             assert diff != 0, "Can't raise when not facing a bet"
-            bet_size = int(raise_actions_multipliers[action] * self.dealer.pot) - self.raised[self.game_pointer]
+            bet_size = int(raise_actions_multipliers[action] * max(self.raised)) - self.raised[self.game_pointer]
             self.raised[self.game_pointer] += bet_size
             player.bet(chips=bet_size)
             self.not_raise_num = 1
@@ -220,9 +222,11 @@ class NolimitholdemRound:
         diff = max(self.raised) - self.raised[self.game_pointer]
 
         #
-        # Case 1 - Not facing a bet
+        # Case 1 - No bets have been made this round
         #
-        if diff == 0:
+        if (#all(r == 0 for r in self.raised) or
+            diff == 0 # Special case - the big blind can check their option to close the preflop round
+        ):
             #
             # Add legal default actions
             legal_actions.add(Action.CHECK)
@@ -233,11 +237,9 @@ class NolimitholdemRound:
                 if (player.remained_chips > multiplier * self.dealer.pot): # Player has enough chips
                     legal_actions.add(action)
         #
-        # Case 2 - Facing a bet
+        # Case 2 - Bets have been made this round
         #
         else:
-            #
-            # Add legal default actions
             legal_actions.add(Action.FOLD)   # The player can always fold
             legal_actions.add(Action.CALL)   # The player can always call
             if player.remained_chips > diff: # The player can go all-in if they have enough chips

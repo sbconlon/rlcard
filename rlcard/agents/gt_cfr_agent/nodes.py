@@ -188,7 +188,8 @@ class CFRNode(ABC):
             if is_error:
                 raise ValueError("Input matrix has non-zero values for invalid hands")
         except:
-            import ipdb; ipdb.post_mortem()
+            import ipdb; ipdb.set_trace()
+            assert(False)
     #
     # Activate the entire game tree
     # (ABC method)
