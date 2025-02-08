@@ -1,5 +1,6 @@
-from rlcard.games.limitholdem.utils import compare_hands
 import numpy as np
+
+from rlcard.games.limitholdem.utils import compare_hands
 
 
 class LimitHoldemJudger:

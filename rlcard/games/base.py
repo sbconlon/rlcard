@@ -1,3 +1,5 @@
+import treys
+
 ''' Game-related base classes
 '''
 class Card:
@@ -62,3 +64,8 @@ class Card:
         if self.suit == 'RJ':
             return 53
         return 13*Card.valid_suit.index(self.suit) + Card.valid_rank.index(self.rank)
+    
+    def to_treys(self):
+        '''Returns the associated treys Card object'''
+        card = str(self)
+        return treys.Card.new(card[0] + card[1].lower()) # 'AH' -> 'Ah'

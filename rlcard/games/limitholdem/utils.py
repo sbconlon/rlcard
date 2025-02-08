@@ -1,3 +1,5 @@
+import treys
+
 import numpy as np
 
 class Hand:

@@ -21,7 +21,8 @@ from abc import ABC, abstractmethod
 import copy
 from itertools import permutations, combinations
 import numpy as np
-from sparse import COO
+#from sparse import COO
+import treys
 
 # Internal imports
 from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork
@@ -146,7 +147,9 @@ class CFRNode(ABC):
         #       given that they have the hand (card1, card2)
         #
         self.player_ranges = player_ranges
-        self.check_matrix(self.player_ranges)
+        
+        # DEBUG
+        #self.check_matrix(self.player_ranges)
         
         #
         # CFR value of holding each possible hand according to the current strategy profile
@@ -356,82 +359,114 @@ class TerminalNode(CFRNode):
         assert board not in TerminalNode.payoffs_cache
 
         #
-        # Remember the actual hands for each player
+        # Deck of trey cards
         #
-        # NOTE 1 - Do we care about storing their real hands in this node?
-        #          for the time being, we will insist that each node stores an accurate,
-        #          full game state representation, even if this is not neccessary for this node.
-        #
-        real_hands = [game.players[pid].hand for pid in range(game.num_players)]
+        deck = sorted(init_standard_deck(), key=lambda x: x.to_int()) 
+        trey_deck = [card.to_treys() for card in deck]
+        community_cards = [card.to_treys() for card in game.public_cards]
+        community_idxs = [card.to_int() for card in game.public_cards]
 
         #
-        # Initialize payoffs matrix to all zeros
+        # Get a vector of hand ranks
         #
-        shape = [game.num_players] + [52, 52]*game.num_players
-        payoffs = np.zeros(shape, dtype=np.float64)
-        #self.payoffs = COO(
-        #                   coords=np.empty((0, len(shape)), dtype=np.int64),  # No coordinates
-        #                   data=np.empty(0, dtype=np.float64),                # No values
-        #                   shape=shape
-        #)
-
-        #
-        # Get the set of possible cards 
-        # the players can have in their hands
-        #
-        possible_cards = [card for card in init_standard_deck() if card not in game.public_cards]
-
-        #
-        # For each possible hand combination...
-        #
-        # Note -
-        #     combinations(possible_cards, 2) 
-        #         = list of all possible 2 card hands
-        #
-        #     permulations(..., num_player) 
-        #         = list of all possible hand assignments to each player
-        #
-        for hands in permutations(combinations(possible_cards, 2), game.num_players):
-            #
-            # Filter out hand combinations that share cards
-            #
-            # i.e. It is impossible for Player 1 and Player 2 to both
-            #      be holding the ace of spades.
-            #
-            if not set(hands[0]).isdisjoint(set(hands[1])):
-                continue
-            #
-            # Assign the hypothetical hands to each player in the game instance
-            #
-            for pid, hand in enumerate(hands):
-                game.players[pid].hand = list(hand)
-            #
-            # Compute the payoffs for this hand configuration 
-            # in this node's game state
-            #
-            hand_payoffs = game.get_payoffs()
-            #
-            # Translate cards in the hand configuration to indexes
-            #
-            card_idxs = [idx for hand in hands for idx in [hand[0].to_int(), hand[1].to_int()]]
-            #
-            # Set each player's payoffs in the matrix
-            #
-            # Note: Scale each payout by the pot size.
-            #       This way, showdowns with different pot sizes can share the same payout matrix
-            #
-            for pid in range(len(hands)):
-                # Node edited indexing to be backward compatible with older version of python
-                payoffs[tuple([pid] + card_idxs)] = hand_payoffs[pid] / game.dealer.pot
+        """
+        idx_to_2d = np.triu_indices(52, k=1)
+        evaluator = treys.Evaluator()
         
-        #
-        # Restore the players' real hands in the game object
-        #
-        for pid, hand in enumerate(real_hands):
-            game.players[pid].hand = hand
-        #
-        # Save the computed payout matrix in the payout cache
-        #
+        # Modified eval_hand function
+        def eval_hand(idx):
+            idx = np.atleast_1d(idx).astype(int)  # Ensure idx is a numpy array
+            
+            # Convert flat idx to 2D indices
+            card1 = idx_to_2d[0][idx]
+            card2 = idx_to_2d[1][idx]
+            
+            # Vectorized filtering of invalid hands
+            mask = np.isin(card1, community_idxs) | np.isin(card2, community_idxs)
+            
+            # Compute hand rankings (assign np.inf to invalid hands)
+            hand_ranks = np.full(idx.shape, np.inf)  # Initialize all as np.inf
+            valid_idx = ~mask  # Boolean mask for valid hands
+            
+            if np.any(valid_idx):  # Only evaluate valid hands
+                hand_ranks[valid_idx] = [
+                    evaluator.evaluate([trey_deck[c1], trey_deck[c2]], community_cards)
+                    for c1, c2 in zip(card1[valid_idx], card2[valid_idx])
+                ]
+            
+            return hand_ranks
+        
+
+        # Vectorized evaluation
+        eval_func = np.vectorize(eval_hand, otypes=[float])  # Vectorize the function
+        hand_evals = eval_func(np.arange(1326))  # Apply over all indices
+
+        import ipdb; ipdb.set_trace()
+        """
+
+        evaluator = treys.Evaluator()
+        hand_evals = np.ones((52, 52)) * np.inf
+        for x in range(52):
+            if x in community_idxs:
+                continue
+            for y in range(x+1, 52):
+                if y in community_idxs:
+                    continue
+                hand_evals[x, y] = evaluator.evaluate(community_cards, [trey_deck[x], trey_deck[y]])
+
+        # Vectorized version of get_hand_payoff
+        def get_hand_payoff(pid, card1, card2, card3, card4, evals):
+            """
+            Compute the payoff of a poker hand matchup in a vectorized manner.
+            """
+            # Ensure values are integers
+            card1, card2, card3, card4 = map(np.asarray, (card1, card2, card3, card4))
+
+            # Condition 1: Invalid hands (wrong ordering)
+            invalid_hands = (card1 >= card2) | (card3 >= card4)
+
+            # Condition 2: Duplicate or community card in hand
+            unique_cards = (card1 != card3) & (card1 != card4) & (card2 != card3) & (card2 != card4)
+            no_community_cards = (~np.isin(card1, community_idxs)) & (~np.isin(card2, community_idxs)) \
+                                & (~np.isin(card3, community_idxs)) & (~np.isin(card4, community_idxs))
+            valid_hands = unique_cards & no_community_cards & ~invalid_hands
+
+            # Compare hand strengths using precomputed `hand_evals`
+            # NOTE - not using equality here, in the case of draws we want the payoff to remain zero.
+            player1_wins = evals[card1, card2] < evals[card3, card4]
+            player2_wins = evals[card1, card2] > evals[card3, card4]
+
+            # Initialize payoff vector
+            payoffs = np.zeros_like(card1, dtype=np.float64)  # Default all payoffs to 0
+
+            # Assign the winning hands 1s and losing hands -1s
+            payoffs = np.where(
+                player1_wins & valid_hands, 
+                np.where(pid==0, 1, -1),
+                payoffs
+            )
+
+            payoffs = np.where(
+                player2_wins & valid_hands, 
+                np.where(pid==1, 1, -1), 
+                payoffs
+            )
+
+            return payoffs
+
+        # Define shape
+        shape = [game.num_players] + [52, 52] * game.num_players
+
+        # Apply vectorized function
+        payoffs = np.fromfunction(lambda pid, c1, c2, c3, c4: get_hand_payoff(pid.astype(int), 
+                                                                              c1.astype(int), 
+                                                                              c2.astype(int), 
+                                                                              c3.astype(int), 
+                                                                              c4.astype(int),
+                                                                              hand_evals), 
+                                                                              shape, dtype=np.float64)
+
+        # Save the payoffs matrix
         TerminalNode.payoffs_cache[board] = payoffs
 
 
@@ -532,79 +567,66 @@ class TerminalNode(CFRNode):
     # Returns an empty list because no querries to the cfvn were needed.
     #
     def update_values(self) -> list:
+        
+        
+
+        
+        # DEBUG
+        #self.check_matrix(self.player_ranges)
+            
+        """
+        print()
+        history = self.game.trajectory[8:]
+        pstr = '--> Value update on '
+        for aid in history[:-1]:
+            pstr += str(Action(aid)) + ' -> '
+        pstr += str(Action(history[-1]))
+        pstr += ' Terminal Node'
+        print(pstr)
+        print([str(card) for card in self.game.public_cards], f' Pot: {self.game.dealer.pot}')
+        print(f'Player {pid} {tuple(str(card) for card in self.game.players[pid].hand)}')
+        
+        card1, card2 = self.game.players[pid].hand[0].to_int(), self.game.players[pid].hand[1].to_int()
+        print(f'Player {pid} reach prob. = {self.player_ranges[pid, card1, card2]}')
+        """
+        
         #
-        # Look up the payoffs matrix in the cache, if this is a river showdown
+        # Compute the expected value matrix for player pid
+        #
+        # Note: payoffs from the cache have to be scaled by the pot size
         #
         if self.num_active > 1:
+            #
+            # Look up the payoffs matrix in the cache, if this is a river showdown
+            #
             assert TerminalNode.is_in_cache(self.game), "Cant update values if the node's payoffs havent been computed"
             key = TerminalNode.five_cards_to_str(self.game.public_cards)
             payoffs = TerminalNode.payoffs_cache[key]
-        
-        # DEBUG
-        self.check_matrix(self.player_ranges)
-
-        #
-        # For each player...
-        #
-        for pid in range(self.game.num_players):
             #
-            # If pid is 0, then the opponent's pid is 1
-            # And, vice versa.
+            # self.player_ranges[opp_pid] -> (52, 52), prob of the opponent holding cards (k, k)
+            # self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :] -> (1, 1, 52, 52), adds two ficticous dimensions
+            # payoffs[pid] -> (52, 52, 52, 52), payoff for pid holding cards (i, j) and opponent holding (k, l)
             #
-            # NOTE - Eventually, this should be rewritten for >2 player games
+            # payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :] = payoffs[pid][i, j, k, l] * self.player_ranges[opp_pid][k, l] -> (52, 52, 52, 52)
             #
-            opp_pid = (pid + 1) % 2
-            
-            """
-            print()
-            history = self.game.trajectory[8:]
-            pstr = '--> Value update on '
-            for aid in history[:-1]:
-                pstr += str(Action(aid)) + ' -> '
-            pstr += str(Action(history[-1]))
-            pstr += ' Terminal Node'
-            print(pstr)
-            print([str(card) for card in self.game.public_cards], f' Pot: {self.game.dealer.pot}')
-            print(f'Player {pid} {tuple(str(card) for card in self.game.players[pid].hand)}')
-            
-            card1, card2 = self.game.players[pid].hand[0].to_int(), self.game.players[pid].hand[1].to_int()
-            print(f'Player {pid} reach prob. = {self.player_ranges[pid, card1, card2]}')
-            """
-            
+            # (payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(2, 3) = sum_{k, l} payoffs[pid][i, j, k, l] * self.player_ranges[opp_pid][k, l] -> (52, 52)
+            #     = self.values[pid]
             #
-            # Compute the expected value matrix for player pid
+            # self.values[pid][i, j] = sum_{k,l} payoffs[pid][i, j, k, l] * self.player_ranges[k, l]
+            #                        = sum_{all opponent hands} [payoff of pid holding hand (i, j) vs opp_pid holding hand (k, l)] * prob opp_pid is holding hand (k, l) 
             #
-            # Note: payoffs from the cache have to be scaled by the pot size
-            #
-            if self.num_active > 1:
-                #
-                # self.player_ranges[opp_pid] -> (52, 52), prob of the opponent holding cards (k, k)
-                # self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :] -> (1, 1, 52, 52), adds two ficticous dimensions
-                # payoffs[pid] -> (52, 52, 52, 52), payoff for pid holding cards (i, j) and opponent holding (k, l)
-                #
-                # payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :] = payoffs[pid][i, j, k, l] * self.player_ranges[opp_pid][k, l] -> (52, 52, 52, 52)
-                #
-                # (payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(2, 3) = sum_{k, l} payoffs[pid][i, j, k, l] * self.player_ranges[opp_pid][k, l] -> (52, 52)
-                #     = self.values[pid]
-                #
-                # self.values[pid][i, j] = sum_{k,l} payoffs[pid][i, j, k, l] * self.player_ranges[k, l]
-                #                        = sum_{all opponent hands} [payoff of pid holding hand (i, j) vs opp_pid holding hand (k, l)] * prob opp_pid is holding hand (k, l) 
-                #
-                sum_axis = (2, 3) if pid == 0 else (0, 1)
-                if pid == 0:
-                    self.values[pid] = self.game.dealer.pot * (payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=sum_axis)
-                else:
-                    self.values[pid] = self.game.dealer.pot * (payoffs[pid] * self.player_ranges[opp_pid][:, :, np.newaxis, np.newaxis]).sum(axis=sum_axis)
-                #print(f'value = pot * sum(opp range) = {self.game.dealer.pot} * {((payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :]).sum(axis=sum_axis))[card1, card2]} = {self.values[pid, card1, card2]}')
-            else:
-                self.values[pid] = np.triu(np.ones((52, 52)) * self.payoffs[pid] * np.sum(self.player_ranges[opp_pid]), k=1)
-                #print(f'value = fixed payoff * prob opp reaches here = {self.payoffs[pid]} * {np.sum(self.player_ranges[opp_pid])} = {self.values[pid, card1, card2]}')
-            #import ipdb; ipdb.set_trace()
+            self.values[0] = 0.5 * self.game.dealer.pot * (payoffs[0] * self.player_ranges[1][np.newaxis, np.newaxis, :, :]).sum(axis=(2, 3))
+            self.values[1] = 0.5 * self.game.dealer.pot * (payoffs[1] * self.player_ranges[0][:, :, np.newaxis, np.newaxis]).sum(axis=(0, 1))
+        else:
+            self.values[0] = np.triu(np.ones((52, 52)) * self.payoffs[0] * np.sum(self.player_ranges[1]), k=1)
+            self.values[1] = np.triu(np.ones((52, 52)) * self.payoffs[1] * np.sum(self.player_ranges[0]), k=1)
         """
+        # DEBUG
         if self.num_active > 1:
+            print('validating...')
             game = copy.deepcopy(self.game)
             # DEBUG - Hard compute the values
-            deck = init_standard_deck()
+            deck = sorted(init_standard_deck(), key=lambda x: x.to_int())
             public_cards = set([card.to_int() for card in self.game.public_cards])
             debug_values = np.zeros((2, 52, 52))
             for i in range(52):
@@ -613,10 +635,13 @@ class TerminalNode(CFRNode):
                         for l in range(k+1, 52):
                             card_set = set([i, j, k, l])
                             if len(card_set) != 4 or not card_set.isdisjoint(public_cards):
+                                assert(payoffs[0, i, j, k, l] == 0 and payoffs[1, i, j, k, l] == 0)
                                 continue
                             game.players[0].hand = [deck[i], deck[j]]
                             game.players[1].hand = [deck[k], deck[l]]
                             payoff = game.get_payoffs()
+                            assert(payoff[0] == 0.5 * self.game.dealer.pot * payoffs[0, i, j, k, l])
+                            assert(payoff[1] == 0.5 * self.game.dealer.pot * payoffs[1, i, j, k, l])
                             debug_values[0, i, j] += payoff[0] * self.player_ranges[1, k, l]
                             debug_values[1, k, l] += payoff[1] * self.player_ranges[0, i, j]
             try:
@@ -626,7 +651,10 @@ class TerminalNode(CFRNode):
                 import ipdb; ipdb.post_mortem()
                 assert(False)
             self.values = debug_values
+            print('done')
         """
+        
+        
         #
         # No querries were made to the cfvn
         #
@@ -964,7 +992,7 @@ class DecisionNode(CFRNode):
             child.player_ranges = np.copy(self.player_ranges)
             child.player_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
             
-            self.check_matrix(child.player_ranges) # DEBUG
+            #self.check_matrix(child.player_ranges) # DEBUG
 
             """
             opp_pid = (pid + 1) % 2
@@ -1094,7 +1122,9 @@ class DecisionNode(CFRNode):
         pid = self.game.game_pointer
         child_ranges = np.copy(self.player_ranges)
         child_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
-        self.check_matrix(child_ranges)
+        
+        #self.check_matrix(child_ranges) # DEBUG
+        
         #
         # Case 1 - Child is a Terminal Node
         #
