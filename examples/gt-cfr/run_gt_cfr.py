@@ -33,11 +33,8 @@ config = {
 
             'starting_stage': 'river',
             'chips_for_each': 10,
-            'disabled_actions': {Action.BET_HALF_POT,
-                                 Action.BET_POT,
-                                 Action.BET_2POT,
+            'disabled_actions': {Action.BET_POT,
                                  Action.BET_5POT,
-                                 Action.RAISE_2X,
                                  Action.RAISE_3X,
                                  Action.RAISE_5X}
 }
@@ -71,5 +68,3 @@ except Exception as e:
 # Display profiler data
 profiler.disable()
 print_rlcard_function_stats(profiler)
-
-import ipdb; ipdb.set_trace()

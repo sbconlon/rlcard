@@ -183,6 +183,7 @@ class CFRNode(ABC):
         try:
             is_error = False
             for i in range(matrix.shape[0]):
+                assert(np.all(matrix[i][np.tril_indices(52)] == 0.))
                 card_idxs = [card.to_int() for card in self.game.public_cards]
                 for cid in card_idxs:
                     if np.any(matrix[i, cid, :]) or np.any(matrix[i, :, cid]):
@@ -567,13 +568,8 @@ class TerminalNode(CFRNode):
     # Returns an empty list because no querries to the cfvn were needed.
     #
     def update_values(self) -> list:
-        
-        
-
-        
         # DEBUG
         #self.check_matrix(self.player_ranges)
-            
         """
         print()
         history = self.game.trajectory[8:]
@@ -589,7 +585,6 @@ class TerminalNode(CFRNode):
         card1, card2 = self.game.players[pid].hand[0].to_int(), self.game.players[pid].hand[1].to_int()
         print(f'Player {pid} reach prob. = {self.player_ranges[pid, card1, card2]}')
         """
-        
         #
         # Compute the expected value matrix for player pid
         #
@@ -653,8 +648,6 @@ class TerminalNode(CFRNode):
             self.values = debug_values
             print('done')
         """
-        
-        
         #
         # No querries were made to the cfvn
         #
@@ -772,6 +765,15 @@ class DecisionNode(CFRNode):
         # Represented as an upper triangular matrix with zeros along the diagonal.
         #
         self.regrets  = np.zeros((len(self.actions), 52, 52))
+
+        #
+        # Used to construct PUCT strategy during tree growth
+        #
+        # Counts child node visits during growth
+        #
+        # self.visits : action -> visit count
+        #
+        self.visits = dict.fromkeys(self.actions, 0)
     
     #
     # Return the average strategy across strategy updates
@@ -1192,7 +1194,7 @@ class DecisionNode(CFRNode):
     #
     # Return true if successful, false otherwise
     #
-    # NOTE - we need to use a mixed strategy here using PUCT statistics.
+    # Note - We use a mixed strategy here using PUCT statistics.
     #        See SOG paper, page 15.
     #
     def grow_tree(self, hands : list[list[int]]) -> bool:
@@ -1208,20 +1210,39 @@ class DecisionNode(CFRNode):
         # Get the acting player's strategy for the provided hand.
         #
         pid = self.game.game_pointer
-        strat = self.strategy[:, hands[pid][0], hands[pid][1]] # np.array, (num_actions,)
+        card1, card2 = hands[pid][0], hands[pid][1]
+        cfr_strat = self.strategy[:, card1, card2] # np.array (num_actions,)
+        assert(np.isclose(np.sum(cfr_strat), 1)) # Check that the CFR strategy is normalized
         #
-        # Sample an action using the acting player's strategy
+        # Compute a strategy weighted by PUCT scores
         #
-        strat = strat / np.sum(strat) # renormalize to avoid floating point error weirdness
-        action = np.random.choice(self.actions, p=strat)
+        total_visits = sum(self.visits.values())
+        puct_scores = np.zeros(len(self.actions)) # np.array (num_actions,)
+        c_puct = 1.0 # PUCT exploration parameter
+        for i, a in enumerate(self.actions):
+            puct_scores[i] = self.children[a].values[pid, card1, card2]
+            puct_scores[i] += c_puct * cfr_strat[i] * np.sqrt(1e-5 + total_visits) / (1 + self.visits[a])
+        epsilon = 1e-5 # Add a small value to ensure we dont assign a zero probability to any action
+        puct_strat = (puct_scores - np.min(puct_scores, 0) + epsilon) / np.sum(puct_scores - np.min(puct_scores, 0)  + epsilon) # Shift and normalize PUCT scores
         #
-        # Check that this child is not None
+        # Mix the CFR and PUCT strategies
         #
-        assert self.children[action] is not None, "Active nodes cant have null children"
+        strat = 0.5 * (cfr_strat + puct_strat)
         #
-        # Recurse to the child
+        # Attempt to add a node in this node's subtree
         #
-        return self.children[action].grow_tree(hands)
+        action_order = np.random.choice(self.actions, size=len(self.actions), p=strat, replace=False) # Order in which to try actions
+        for action in action_order:
+            #
+            # Check that this child is not None
+            #
+            assert self.children[action] is not None, "Active nodes cant have null children"
+            #
+            # Recurse to the child
+            #
+            if self.children[action].grow_tree(hands):
+                return True
+        return False
 
     #
     # Search for the DecisionNode in the node's subtree corresponding
@@ -1312,9 +1333,9 @@ class DecisionNode(CFRNode):
     # Debug function
     #
     def print_tree(self):
-        from anytree import Node, RenderTree
+        import anytree
         
-        root = Node(name="root", value=self)
+        root = anytree.Node(name="root", value=self)
         
         q = [root]
         while q:
@@ -1322,8 +1343,9 @@ class DecisionNode(CFRNode):
             if isinstance(parent_node.value, DecisionNode):
                 for action in parent_node.value.actions:
                     child = parent_node.value.children[action]
-                    node = Node(name=action.value, value=child, parent=parent_node)
-                    q.append(node)
+                    node = anytree.Node(name=action.value, value=child, parent=parent_node)
+                    if child.is_active:
+                        q.append(node)
         
         
         card1 = self.game.players[0].hand[0].to_int()
@@ -1337,7 +1359,7 @@ class DecisionNode(CFRNode):
         print("P1 Hand =", [str(card) for card in self.game.players[1].hand])
         print()
 
-        for pre, fill, node in RenderTree(root):
+        for pre, fill, node in anytree.RenderTree(root):
             
             my_pid = node.value.game.game_pointer
             
@@ -1634,6 +1656,12 @@ class ChanceNode(CFRNode):
     #
     # Add a child node to this subtree
     #
+    # Return True if successful, False otherwise
+    #
+    # NOTE - I think its debatable whether we want to allow growth past chance nodes.
+    #        We would be better off exploring decision nodes in the same stage as our
+    #        decision point.
+    #
     def grow_tree(self, hands : list[list[int]]) -> bool:
         #
         # If this node isn't active, then activate it.
@@ -1663,22 +1691,27 @@ class ChanceNode(CFRNode):
         #
         # Note 2: We are always guaranteed that a valid outcome exists.
         #
+        sampled_idxs = set() # Remember the outcomes we sample
         used_cards = {card for hand in hands for card in hand}
-        while True:
+        while len(sampled_idxs) < len(self.outcomes):
             idx = np.random.choice(len(self.outcomes))
-            if all(card.to_int() not in used_cards for card in self.outcomes[idx]):
-                break
+            # Skip outcomes that have been tried before
+            if idx in sampled_idxs:
+                continue
+            sampled_idxs.add(idx)
+            # Skip outcomes that contain invalid cards
+            if any(card.to_int() in used_cards for card in self.outcomes[idx]):
+                continue
+            # Attempt to add a node to the outcome's subtree, return True if successful
+            if self.children[idx].grow_tree(hands):
+                return True
         #
-        # If the child node associated with this outcome is not in the game tree,
-        # then add it.
+        # Subtree is full
         #
-        if idx not in self.children:
-            self.add_child(idx)
-            return True
+        # Note: This should never be the case in practice since the chance node
+        #       has a high branching factor.
         #
-        # Else, the child is not in the game tree and we can recurse.
-        #
-        return self.children[idx].grow_tree(hands)
+        return False
     
     #
     # Debug function

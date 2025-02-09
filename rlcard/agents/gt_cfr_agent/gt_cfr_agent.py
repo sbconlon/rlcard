@@ -67,6 +67,7 @@ class GTCFRSolver():
         # Set to None upon class initialization.
         #
         self.root = None
+        self.full_tree = False
         #
         # Decision point
         #
@@ -281,12 +282,6 @@ class GTCFRSolver():
             #
             player_range = uniform_range(input_game.public_cards)
             player_ranges = GTCFRSolver.compute_initial_ranges(input_game, player_range)
-            
-            # NOTE - DEBUG
-            #player_ranges = np.zeros((2, 52, 52))
-            #player_ranges[0] = uniform_range(input_game.public_cards)
-            #player_ranges[1] = uniform_range(input_game.public_cards)
-            
             #
             # Initialize the root node of the public game tree
             #
@@ -294,6 +289,7 @@ class GTCFRSolver():
             #        Nothing should be editing the game state while we solve.
             #
             self.root = DecisionNode(copy.deepcopy(input_game), player_ranges)
+            self.full_tree = False
             #
             # Initialize the gadget game
             #
@@ -302,9 +298,10 @@ class GTCFRSolver():
             # The root node is the decision node we are solving
             #
             self.trajectory_seed = []
-            
+            """
             # DEBUG - Activate the full game tree for debugging purpuses
             self.root.activate_full_tree()
+            """
         #
         # Case 2 - Existing game tree. No input player range or opponent values.
         #
@@ -351,6 +348,7 @@ class GTCFRSolver():
             # NOTE - Same as Case 1, not sure if this needs to be a deepcopy.
             #
             self.root = DecisionNode(copy.deepcopy(input_game), player_ranges)
+            self.full_tree = False
             #
             # Initialize the gadget game with the opponent's values
             #
@@ -372,10 +370,6 @@ class GTCFRSolver():
         # Store a reference to the CFVN in the game tree
         #
         CFRNode.set_cfvn(self.cfvn)
-        
-        self.decision_point = self.root
-        
-        """
         #
         # Activate the root node
         #
@@ -405,7 +399,6 @@ class GTCFRSolver():
                 if not child.is_active:
                     child.activate()
             self.decision_point = self.root
-        """
 
     #
     # Update the regrets in the gadget game
@@ -447,8 +440,10 @@ class GTCFRSolver():
         safe_denom = np.where(denom == 0, 1, denom) # remove zeros from denom to avoid dividing by zero
         gadget_follow_strat = np.where(denom == 0, 0.5, gadget_regrets_positives[0] / safe_denom)
 
+        """
         # DEBUG
-        #print(f'Follow strat - {gadget_follow_strat[card1, card2]}')
+        print(f'Follow strat - {gadget_follow_strat[card1, card2]}')
+        """
 
         #
         # In the above line, we assign 50-50 probability to hands with zero in the denominator.
@@ -461,7 +456,7 @@ class GTCFRSolver():
         for idx in public_card_idxs:
             gadget_follow_strat[:, idx] = 0.
             gadget_follow_strat[idx, :] = 0.
-
+        gadget_follow_strat[np.tril_indices(52)] = 0.
 
         #
         # Set the opponent's range in the cfr root node to the gadget's follow strategy 
@@ -584,26 +579,45 @@ class GTCFRSolver():
     # Which node to add is determined by sampling a hand configuration
     # weighted by the player's ranges at the root node, then actions are 
     # sampled down the tree until an action for which the resulting node 
-    # is not in tree. Then that node is added to the tree.
+    # is not activated. Then that node is activated.
     #
-    # In some instances, the sampled trajectory will lead
-    # to a terminal node. In which case, another trajectory should be sampled.
+    # If the tree is full, then set a parameter to skip growth attempts
+    # in the future.
     #
     def grow(self) -> None:
         #
-        # Sample hand assignments for each player, weighted by their ranges
-        # in the root node.
+        # Skip the grow attempt if the game tree is full
         #
-        hands = [] # list of player's hands
+        if self.full_tree:
+            return
+        #
+        # The acting player recieves their true hand assignemnt. 
+        #
+        # All other player's hand assignments are sampled at random, weighted 
+        # by their ranges at the decision point.
+        #
+        hands = [None] * self.root.game.num_players # list of player's hands
         used_cards = set() # track cards that've been used by previous players
         #
-        # For each player...
+        # Give the acting player their true hand
         #
-        for pid in range(self.decision_point.game.num_players):
+        pid = self.decision_point.game.game_pointer
+        hands[pid] = tuple(card.to_int() for card in self.decision_point.game.players[pid].hand)
+        used_cards.add(hands[pid][0])
+        used_cards.add(hands[pid][1])
+        #
+        # For each opponent player...
+        #
+        for opp_pid in range(self.decision_point.game.num_players):
+            #
+            # Skip the acting player
+            #
+            if pid == opp_pid:
+                continue
             #
             # Get the probability the player is holing each hand
             #
-            hand_probs = np.copy(self.decision_point.player_ranges[pid])
+            hand_probs = np.copy(self.decision_point.player_ranges[opp_pid])
             #
             # Mask out cards that have already been taken
             #
@@ -614,6 +628,10 @@ class GTCFRSolver():
             # Normalize the hand probabilities
             #
             hand_probs /= hand_probs.sum()
+            """
+            # DEBUG
+            self.decision_point.check_matrix(np.array([hand_probs]))
+            """
             #
             # Sample a hand
             #
@@ -625,11 +643,11 @@ class GTCFRSolver():
             #
             # Check that the hand is valid
             #
-            assert hand[0] < hand[1], "Ill-formatted hand selected"
+            assert hand[0] < hand[1], 'Ill-formatted hand selected'
             #
             # Add the hand to the hand list
             #
-            hands.append(hand)
+            hands[opp_pid] = hand
             #
             # Update used cards set
             #
@@ -639,10 +657,7 @@ class GTCFRSolver():
         # Try to add a node to the subtree,
         # using the given hand to sample a trajectory
         #
-        max_attempts = 10
-        attempts = 0
-        while not self.decision_point.grow_tree(hands) and attempts < max_attempts:
-            attempts += 1
+        self.full_tree = not self.decision_point.grow_tree(hands)
     
     #
     # Growing Tree Counterfacutal Regret
@@ -652,18 +667,20 @@ class GTCFRSolver():
         # Each iteration computes the values of each node in the public state tree,
         # then adds a new leaf node to the tree.
         #
-        #for i in range(self.n_expansions):
-        for i in range(1):
-            #print(f'--> GT-CFR loop {i}')
+        for i in range(self.n_expansions):
             #
             # Run cfr to update the policy and regret estimates 
             # for each state in the tree
             #
+            print('start cfr...')
             self.cfr(train=train)
+            print('done.')
+            print('start grow...')
             #
-            # Add a new state node to the game tree
+            # Add a new node to the game tree
             #
-            #self.grow() # NOTE - DEBUG
+            self.grow()
+            print('done.')
     
     #
     # Wrapper function around gt-cfr to handle fully solving a 
