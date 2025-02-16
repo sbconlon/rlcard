@@ -219,6 +219,7 @@ class ReplayBuffer:
                 #
                 else:
                     self._update_weights(idx)
+        return samples
 
     #
     # Return the buffer size
