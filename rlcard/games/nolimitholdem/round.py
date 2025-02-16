@@ -207,7 +207,7 @@ class NolimitholdemRound:
            (list):  A list of legal actions
         """
         #
-        # Start with a list of all actions
+        # Track the legal actions
         #
         legal_actions = set()
 
@@ -268,3 +268,9 @@ class NolimitholdemRound:
         if self.not_raise_num + self.not_playing_num >= self.num_players:
             return True
         return False
+    
+    #
+    # Get a list of all actions
+    #
+    def get_all_actions(self):
+        return [action for action in Action if action not in self.disabled_actions]

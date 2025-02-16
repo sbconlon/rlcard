@@ -149,7 +149,7 @@ class CFRNode(ABC):
         self.player_ranges = player_ranges
         
         # DEBUG
-        #self.check_matrix(self.player_ranges)
+        self.check_matrix(self.player_ranges)
         
         #
         # CFR value of holding each possible hand according to the current strategy profile
@@ -184,6 +184,7 @@ class CFRNode(ABC):
             is_error = False
             for i in range(matrix.shape[0]):
                 assert(np.all(matrix[i][np.tril_indices(52)] == 0.))
+                #assert not np.all(matrix[i] == 0.), "Input matrix has all zero values"
                 card_idxs = [card.to_int() for card in self.game.public_cards]
                 for cid in card_idxs:
                     if np.any(matrix[i, cid, :]) or np.any(matrix[i, :, cid]):
@@ -192,7 +193,9 @@ class CFRNode(ABC):
             if is_error:
                 raise ValueError("Input matrix has non-zero values for invalid hands")
         except:
-            import ipdb; ipdb.set_trace()
+            import traceback
+            print(traceback.format_exc())
+            #import ipdb; ipdb.set_trace()
             assert(False)
     #
     # Activate the entire game tree
@@ -569,7 +572,7 @@ class TerminalNode(CFRNode):
     #
     def update_values(self) -> list:
         # DEBUG
-        #self.check_matrix(self.player_ranges)
+        self.check_matrix(self.player_ranges)
         """
         print()
         history = self.game.trajectory[8:]
@@ -886,7 +889,9 @@ class DecisionNode(CFRNode):
         #
         # Query the network
         #
-        self.strategy, self.values = DecisionNode.get_cfvn().query(input)
+        all_actions = self.game.round.get_all_actions()
+        valid_action_idxs = [all_actions.index(action) for action in self.actions]
+        self.strategy, self.values = DecisionNode.get_cfvn().query(input, valid_action_idxs)
         
         pid = self.game.game_pointer
         """
@@ -994,7 +999,7 @@ class DecisionNode(CFRNode):
             child.player_ranges = np.copy(self.player_ranges)
             child.player_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
             
-            #self.check_matrix(child.player_ranges) # DEBUG
+            self.check_matrix(child.player_ranges) # DEBUG
 
             """
             opp_pid = (pid + 1) % 2
@@ -1125,7 +1130,7 @@ class DecisionNode(CFRNode):
         child_ranges = np.copy(self.player_ranges)
         child_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
         
-        #self.check_matrix(child_ranges) # DEBUG
+        self.check_matrix(child_ranges) # DEBUG
         
         #
         # Case 1 - Child is a Terminal Node

@@ -400,12 +400,11 @@ class NolimitholdemGame(Game):
         chips_payoffs = self.judger.judge_game(self.players, hands)
         return chips_payoffs
 
-    @staticmethod
-    def get_num_actions():
+    def get_num_actions(self):
         """
         Return the number of applicable actions
 
         Returns:
-            (int): The number of actions. There are 6 actions (call, raise_half_pot, raise_pot, all_in, check and fold)
+            (int): The number of actions.
         """
-        return len(Action)
+        return len(Action) - len(self.disabled_actions)

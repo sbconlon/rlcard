@@ -8,8 +8,6 @@
 # The buffer has a fixed size, after which elements are evicted on a        #
 # FIFO basis.                                                               #
 #                                                                           #
-# The buffer is designed to be support multiprocessing.                     #
-#                                                                           #
 # Elements are sampled with a preference towards elements that have         #
 # not been sampled many times in the past.                                  #
 #                                                                           #
@@ -20,15 +18,13 @@ from bisect import bisect_left
 from collections import deque
 import numpy as np
 import random
-import threading
 
 #
 # Store elements and allow elements to be randomly sampled.
 #
 # Evict elements after they've been sampled a fixed number of times.
 #
-class FIFOBuffer:
-    
+class ReplayBuffer:
     #
     # Initialize the buffer as queue with a fixed size.
     #
@@ -55,10 +51,6 @@ class FIFOBuffer:
         # Cumulative weights for fast sampling
         #
         self.cum_weights = []
-        #
-        # Lock
-        #
-        self.lock = threading.Lock()
     
     #
     # Add an element
@@ -71,48 +63,42 @@ class FIFOBuffer:
         #
         # Prevent race conditions
         #
-        with self.lock:
+        # Add the item to the buffer
+        #
+        self.buffer.append(item)
+        #
+        # The new item starts with a sample count of zero.
+        #
+        self.sample_counts.append(0)
+        #
+        # Append cumulative weights for binary search sampling
+        #
+        if self.cum_weights:
             #
-            # Add the item to the buffer
+            # New weight = 1 / (count + 1)
             #
-            self.buffer.append(item)
+            self.cum_weights.append(self.cum_weights[-1] + 1)
+        else:
             #
-            # The new item starts with a sample count of zero.
+            # Else, start the cumulative weights list with 1
             #
-            self.sample_counts.append(0)
-            #
-            # Append cumulative weights for binary search sampling
-            #
-            if self.cum_weights:
-                #
-                # New weight = 1 / (count + 1)
-                #
-                self.cum_weights.append(self.cum_weights[-1] + 1)
-            else:
-                #
-                # Else, start the cumulative weights list with 1
-                #
-                self.cum_weights.append(1)
+            self.cum_weights.append(1)
     
     #
     # Remove and return the oldest item
     #
     def get(self):
         #
-        # Prevent race conditions
+        # Handle empty buffer case
         #
-        with self.lock:
-            #
-            # Handle empty buffer case
-            #
-            if len(self.buffer) == 0:
-                raise IndexError("Buffer is empty")
-            #
-            # Remove the item, its counts, and its cumulative weights
-            #
-            self.sample_counts.popleft()
-            self.cum_weights.pop(0)
-            return self.buffer.popleft()
+        if len(self.buffer) == 0:
+            raise IndexError("Buffer is empty")
+        #
+        # Remove the item, its counts, and its cumulative weights
+        #
+        self.sample_counts.popleft()
+        self.cum_weights.pop(0)
+        return self.buffer.popleft()
     
     #
     # Update the cumulative weights list when an element is sampled.
@@ -174,80 +160,74 @@ class FIFOBuffer:
     #
     def sample(self, batch_size: int =1):
         #
-        # Prevent race conditions
+        # Handle empty buffer case
         #
-        with self.lock:
+        if len(self.buffer) == 0:
+            raise IndexError("Buffer is empty")
+        #
+        # Generate batch indices using binary search
+        #
+        samples = []
+        #
+        # Track sampled indices to prevent duplicate items being sampled
+        #
+        sampled_idxs = set()
+        #
+        # While we still need samples...
+        #
+        while len(samples) < batch_size:
             #
-            # Handle empty buffer case
+            # Generate a random number for weighted sampling
+            # in the range [0, sum(weights)]
             #
-            if len(self.buffer) == 0:
-                raise IndexError("Buffer is empty")
+            rand_val = random.uniform(0, self.cum_weights[-1])
             #
-            # Generate batch indices using binary search
+            # Get the idx corresponding to the random value
             #
-            samples = []
+            # Run binary search to find the idx in the list
+            # such that, 
+            # 
+            # cum_weights[idx] <= rand_val < cum_weights[idx + 1]
             #
-            # Track sampled indices to prevent duplicate items being sampled
+            # O(log N)
             #
-            sampled_idxs = set()
+            idx = bisect_left(self.cum_weights, rand_val)
             #
-            # While we still need samples...
+            # If the index is unique...
             #
-            while len(samples) < batch_size:
+            if idx not in sampled_idxs:
                 #
-                # Generate a random number for weighted sampling
-                # in the range [0, sum(weights)]
+                # Add the corresponding item to the samples list
                 #
-                rand_val = random.uniform(0, self.cum_weights[-1])
+                samples.append(self.buffer[idx])
                 #
-                # Get the idx corresponding to the random value
+                # Remember that we have sampled this item already
                 #
-                # Run binary search to find the idx in the list
-                # such that, 
+                sampled_idxs.add(idx)
                 # 
-                # cum_weights[idx] <= rand_val < cum_weights[idx + 1]
+                # Update weights
                 #
-                # O(log N)
+                self.sample_counts[idx] += 1
                 #
-                idx = bisect_left(self.cum_weights, rand_val)
+                # If this item has been sampled too many times,
+                # then evict it.
                 #
-                # If the index is unique...
+                if self.sample_counts[idx] >= self.max_samples:
+                    self._evict(idx)
                 #
-                if idx not in sampled_idxs:
-                    #
-                    # Add the corresponding item to the samples list
-                    #
-                    samples.append(self.buffer[idx])
-                    #
-                    # Remember that we have sampled this item already
-                    #
-                    sampled_idxs.add(idx)
-                    # 
-                    # Update weights
-                    #
-                    self.sample_counts[idx] += 1
-                    #
-                    # If this item has been sampled too many times,
-                    # then evict it.
-                    #
-                    if self.sample_counts[idx] >= self.max_samples:
-                        self._evict(idx)
-                    #
-                    # Else, update the sample weights for this element.
-                    #
-                    else:
-                        self._update_weights(idx)
+                # Else, update the sample weights for this element.
+                #
+                else:
+                    self._update_weights(idx)
 
     #
     # Return the buffer size
     #
     def size(self):
-        with self.lock:
-            return len(self.buffer)
+        return len(self.buffer)
     
     #
     # Return if the buffer is empty
     #
     def is_empty(self):
-        with self.lock:
-            return len(self.buffer) == 0
+        return len(self.buffer) == 0

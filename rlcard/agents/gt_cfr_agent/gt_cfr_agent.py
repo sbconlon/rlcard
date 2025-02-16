@@ -12,6 +12,7 @@ from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode, ChanceNode
 from rlcard.agents.gt_cfr_agent.utils import uniform_range, random_range, starting_hand_values
 from rlcard.envs.nolimitholdem import NolimitholdemEnv
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
+from rlcard.games.nolimitholdem.round import Action
 
 # Avoid a circular import
 if TYPE_CHECKING:
@@ -79,6 +80,8 @@ class GTCFRSolver():
         #
         self.trajectory_seed = None
         self.decision_point = None
+
+        self.temp = 0
 
     #
     # Initialize the gadget game
@@ -381,13 +384,14 @@ class GTCFRSolver():
         #
         if self.trajectory_seed:
             node = self.root
-            for i in self.trajectory_seed:
+            for value in self.trajectory_seed:
                 if not node.is_active:
                     node.activate()
                 if isinstance(node, DecisionNode):
-                    node = node.children[self.trajectory_seed[i]]
+                    action = Action(value)
+                    node = node.children[action]
                 elif isinstance(node, ChanceNode):
-                    node = node.outcomes[self.trajectory_seed[i]]
+                    node = node.outcomes[value]
                 else:
                     raise ValueError('Terminal node should not be encountered on a seed trajectory')
             self.decision_point = node
@@ -488,7 +492,10 @@ class GTCFRSolver():
         #          Normalized    = prob opp. player reaches the root state and has the hand (i, j)
         #
         opp_pid = (self.root.game.game_pointer + 1) % 2
-        self.root.player_ranges[opp_pid] = gadget_follow_strat / np.sum(gadget_follow_strat)
+        if np.sum(gadget_follow_strat) != 0:
+            self.root.player_ranges[opp_pid] = gadget_follow_strat / np.sum(gadget_follow_strat)
+        else:
+            self.root.player_ranges[opp_pid] = gadget_follow_strat # ALL ZEROS
 
         #
         # Compute the updated gadget values
@@ -597,7 +604,7 @@ class GTCFRSolver():
         # by their ranges at the decision point.
         #
         hands = [None] * self.root.game.num_players # list of player's hands
-        used_cards = set() # track cards that've been used by previous players
+        used_cards = {card.to_int() for card in self.decision_point.game.public_cards} # track cards that've been used by previous players
         #
         # Give the acting player their true hand
         #
@@ -618,15 +625,22 @@ class GTCFRSolver():
             # Get the probability the player is holing each hand
             #
             hand_probs = np.copy(self.decision_point.player_ranges[opp_pid])
+            
+            #
+            # If a given decision node is so bad for an opponent that
+            # they follow strategy is all zeros, then we can just
+            # sample a hand at random.
+            #
+            if np.sum(hand_probs) == 0:
+                hand_probs = np.triu(np.ones(hand_probs.shape), k=1)
+            
             #
             # Mask out cards that have already been taken
             #
             for card_idx in used_cards:
                 hand_probs[card_idx, :] = 0.
                 hand_probs[:, card_idx] = 0.
-            #
-            # Normalize the hand probabilities
-            #
+
             hand_probs /= hand_probs.sum()
             """
             # DEBUG
@@ -672,15 +686,11 @@ class GTCFRSolver():
             # Run cfr to update the policy and regret estimates 
             # for each state in the tree
             #
-            print('start cfr...')
             self.cfr(train=train)
-            print('done.')
-            print('start grow...')
             #
             # Add a new node to the game tree
             #
             self.grow()
-            print('done.')
     
     #
     # Wrapper function around gt-cfr to handle fully solving a 
@@ -705,6 +715,12 @@ class GTCFRSolver():
                     input_opponent_values: np.ndarray = None,
                     input_player_range: np.ndarray = None,
                     trajectory_seed: list[int] = None) -> tuple[np.ndarray, np.ndarray]:
+        #
+        # Check if the weights need to be updated from shared memory
+        #
+        # Note: if CFVN is not using shared weights, this will do nothing
+        #
+        self.cfvn.update_weights()
         #
         # Initialize the game tree for cfr
         #
