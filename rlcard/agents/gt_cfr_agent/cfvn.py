@@ -412,66 +412,78 @@ class CounterfactualValueNetwork:
                         parent_replay_buffer_queue: Queue,
                         weights_shm_lock: ReadWriteLock,
                         weights_shm_name: str):
-        # Runtime import
-        from queue import Empty
-        import time
-        #
-        # Log the start of the process
-        #
-        print(f'Started trainer process {trainer_id}')
-        #
-        # Initialize this process's CFVN object instance
-        #
-        # NOTE - For now, we use the default params for the CFVN.
-        #        Eventually, we will have to pass the params through as 
-        #        args to query_solver_process()
-        #
-        my_cvfn = CounterfactualValueNetwork(
-            n_query_solvers=0, # Dont spawn query solver processes
-            n_trainers=0, # Dont spawn trainer processes
-            weights_shm_lock=weights_shm_lock, # Use the shared weights buffer
-            weights_shm_name=weights_shm_name # Name of the shared weights buffer
-        )
-        my_cvfn.init_replay_buffer()
-        #
-        # Loop indefinately...
-        #
-        while True:
+        # Wrap process in a try-except block to debug errors
+        try:
+            # Runtime import
+            from queue import Empty
+            import time
             #
-            # Exhaust the replay buffer queue
+            # Log the start of the process
+            #
+            print(f'Started trainer process {trainer_id}')
+            #
+            # Initialize this process's CFVN object instance
+            #
+            # NOTE - For now, we use the default params for the CFVN.
+            #        Eventually, we will have to pass the params through as 
+            #        args to query_solver_process()
+            #
+            my_cvfn = CounterfactualValueNetwork(
+                n_query_solvers=0, # Dont spawn query solver processes
+                n_trainers=0, # Dont spawn trainer processes
+                weights_shm_lock=weights_shm_lock, # Use the shared weights buffer
+                weights_shm_name=weights_shm_name # Name of the shared weights buffer
+            )
+            my_cvfn.init_replay_buffer()
+            #
+            # Loop indefinately...
             #
             while True:
-                try:
-                    # Get training targets from the replay buffer queue
-                    training_targets = parent_replay_buffer_queue.get(block=False)
-                    # Add the training targets to the replay buffer
-                    assert training_targets is not None, "Training targets should not be None"
-                    my_cvfn.add_to_replay_buffer(training_targets)
-                    print(f'Trainer {trainer_id} added a new target to the replay buffer (replay_buffer.size() = {my_cvfn.replay_buffer.size()})')
-                    
-                except Empty:
-                    # If queue is empty, check if we have enough targets
-                    if my_cvfn.replay_buffer.size() >= my_cvfn.batch_size:
-                        # We have enough targets, break to perform update
-                        break
-                    else:
-                        # Wait for more targets
-                        print(f'Trainer {trainer_id} waiting for more targets')
-                        time.sleep(5*60)
-                        continue
-            #
-            # Log
-            #
-            print(f'Trainer {trainer_id} has {my_cvfn.replay_buffer.size()} targets')
-            #
-            # Perform a batch update on the network
-            #
-            my_cvfn.train(trainer_id, niters=1) # 1 batch update
-            #
-            # Save the updated weights to the shared memory buffer
-            #
-            print(f'Trainer {trainer_id} saving weights')
-            my_cvfn.write_weights()
+                #
+                # Exhaust the replay buffer queue
+                #
+                while True:
+                    try:
+                        # Get training targets from the replay buffer queue
+                        training_targets = parent_replay_buffer_queue.get(block=False)
+                        # Add the training targets to the replay buffer
+                        assert training_targets is not None, "Training targets should not be None"
+                        my_cvfn.add_to_replay_buffer(training_targets)
+                        print(f'Trainer {trainer_id} added a new target to the replay buffer (replay_buffer.size() = {my_cvfn.replay_buffer.size()})')
+                        
+                    except Empty:
+                        # If queue is empty, check if we have enough targets
+                        if my_cvfn.replay_buffer.size() >= my_cvfn.batch_size:
+                            # We have enough targets, break to perform update
+                            break
+                        else:
+                            # Wait for more targets
+                            print(f'Trainer {trainer_id} waiting for more targets')
+                            time.sleep(5*60)
+                            continue
+                #
+                # Log
+                #
+                print(f'Trainer {trainer_id} has {my_cvfn.replay_buffer.size()} targets')
+                #
+                # Perform a batch update on the network
+                #
+                my_cvfn.train(trainer_id, niters=1) # 1 batch update
+                #
+                # Save the updated weights to the shared memory buffer
+                #
+                print(f'Trainer {trainer_id} saving weights')
+                my_cvfn.write_weights()
+        #
+        # Spawn a remote pdb session
+        #
+        except Exception as e:
+            print('==================================')
+            print(f'Trainer {trainer_id} error:')
+            print(e)
+            print('==================================')
+            import remote_pdb
+            remote_pdb.set_trace()
 
     #
     # Initialize the process pool for query solvers.
@@ -615,14 +627,20 @@ class CounterfactualValueNetwork:
             # Output the worker error to the console
             #
             except Exception as e:
+                #
+                # Spawn a remote pdb session
+                #
+                import remote_pdb
                 import traceback
-                print()
+                print('==================================')
                 print(f'Query Solver #{query_solver_id} error:')
+                print()
                 print(e)
                 print()
                 print(traceback.format_exc())
                 print()
-                return
+                print('==================================')
+                remote_pdb.set_trace()
 
     #
     # Given a game object and player ranges,

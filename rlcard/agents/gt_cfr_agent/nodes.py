@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 import copy
 from itertools import permutations, combinations
 import numpy as np
+#import cupy as np
 #from sparse import COO
 import treys
 
@@ -149,7 +150,7 @@ class CFRNode(ABC):
         self.player_ranges = player_ranges
         
         # DEBUG
-        self.check_matrix(self.player_ranges)
+        #self.check_matrix(self.player_ranges)
         
         #
         # CFR value of holding each possible hand according to the current strategy profile
@@ -572,7 +573,7 @@ class TerminalNode(CFRNode):
     #
     def update_values(self) -> list:
         # DEBUG
-        self.check_matrix(self.player_ranges)
+        #self.check_matrix(self.player_ranges)
         """
         print()
         history = self.game.trajectory[8:]
@@ -999,7 +1000,7 @@ class DecisionNode(CFRNode):
             child.player_ranges = np.copy(self.player_ranges)
             child.player_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
             
-            self.check_matrix(child.player_ranges) # DEBUG
+            #self.check_matrix(child.player_ranges) # DEBUG
 
             """
             opp_pid = (pid + 1) % 2
@@ -1130,7 +1131,7 @@ class DecisionNode(CFRNode):
         child_ranges = np.copy(self.player_ranges)
         child_ranges[pid] = self.strategy[action_idx] * self.player_ranges[pid]
         
-        self.check_matrix(child_ranges) # DEBUG
+        #self.check_matrix(child_ranges) # DEBUG
         
         #
         # Case 1 - Child is a Terminal Node

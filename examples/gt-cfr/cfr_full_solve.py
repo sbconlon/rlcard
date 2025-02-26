@@ -2,20 +2,14 @@
 #  Train a GT-CFR Agent  #
 # ====================== #
 
-# Debug + Testing imports
-import cProfile
-import ipdb
-
-from print_profiler_stats import print_rlcard_function_stats
+# External imports
+import numpy as np
 
 # Internal imports
 import rlcard
 from rlcard.agents.gt_cfr_agent.gt_cfr_agent import GTCFRAgent
 from rlcard.games.base import Card
 from rlcard.games.nolimitholdem.round import Action
-
-
-
 
 def main():
     #
@@ -47,32 +41,14 @@ def main():
     #
     # Initialize the GT-CFR Agent
     #
-    agent = GTCFRAgent(env)
+    env.reset()
+    agent = GTCFRAgent(env, full_solve=True)
+    agent.solver.n_expansions_per_regret_updates = 1/100000
+    agent.solver.solve(env.game)
+    np.save('strat-fs-7s8s8hThJh.npy', agent.solver.root.strategy)
+    np.save('values-fs-7s8s8hThJh.npy', agent.solver.root.values)
+    print('--> Saved files')
 
-    # Profile self-play
-
-    #profiler = cProfile.Profile()
-    #profiler.enable()
-
-    #
-    # Run self-play training episodes
-    #
-    try:
-
-        for episode in range(num_episodes):
-            print('=====================================================')
-            print()
-            print(f'--> Episode {episode + 1}')
-            print()
-            agent.self_play()
-
-    except Exception as e:
-        print(e)
-        #import ipdb; ipdb.post_mortem()
-
-    # Display profiler data
-    #profiler.disable()
-    #print_rlcard_function_stats(profiler)
 
 
 if __name__ == '__main__': # Needed for multiprocessing

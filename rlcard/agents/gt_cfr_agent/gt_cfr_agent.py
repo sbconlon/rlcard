@@ -5,6 +5,7 @@ import copy
 import math
 import numpy as np
 import random
+import time
 from typing import TYPE_CHECKING
 
 # Internal imports
@@ -31,16 +32,27 @@ class GTCFRSolver():
     # Initialize the GT-CFR Solver parameters and
     # the counterfactual value network.
     #
-    def __init__(self, input_cfvn: CounterfactualValueNetwork =None, prob_query_solve: float =0.9):
+    def __init__(self, input_cfvn: CounterfactualValueNetwork =None, 
+                       prob_query_solve: float =0.9,
+                       full_solve: bool =False # Fully expand the game tree
+        ):
         # Import at runtime
         from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork
         
+        #
+        # Wheter to fully solve the game tree or not
+        #
+        self.full_solve = full_solve
+
         #
         # Initialize the counterfactual value model, if one is not given.
         #
         # NOTE - right now the cfvn is automatically initialized with default params
         #
-        self.cfvn = CounterfactualValueNetwork() if input_cfvn is None else input_cfvn
+        if self.full_solve:
+            self.cfvn = None # We don't need to estimate game states if the tree is fully expanded
+        else:
+            self.cfvn = CounterfactualValueNetwork(n_query_solvers=0, n_trainers=0) if input_cfvn is None else input_cfvn
         #
         # Probability of fully solving a given cfvn query
         # encountered during GT-CFR solving.
@@ -52,7 +64,10 @@ class GTCFRSolver():
         #
         # Note 1: Sometimes refered to as the 's' parameter in the literature
         #
-        self.n_expansions = 10
+        if self.full_solve:
+            self.n_expansions = 1 # Game tree will already be fully expanded
+        else:
+            self.n_expansions = 10
         #
         # Ratio of tree expansion per cfr regret updates
         # Fractional - 0.01 = 100 regret updates per tree expansion
@@ -68,7 +83,7 @@ class GTCFRSolver():
         # Set to None upon class initialization.
         #
         self.root = None
-        self.full_tree = False
+        self.full_tree = self.full_solve
         #
         # Decision point
         #
@@ -80,8 +95,6 @@ class GTCFRSolver():
         #
         self.trajectory_seed = None
         self.decision_point = None
-
-        self.temp = 0
 
     #
     # Initialize the gadget game
@@ -374,35 +387,43 @@ class GTCFRSolver():
         #
         CFRNode.set_cfvn(self.cfvn)
         #
-        # Activate the root node
+        # If we are solving the full game tree, then activate all nodes in the tree.
         #
-        if not self.root.is_active:
-            self.root.activate()
-        #
-        # Activate the nodes along the seed trajectory,
-        # if a seed trajectory is given.
-        #
-        if self.trajectory_seed:
-            node = self.root
-            for value in self.trajectory_seed:
-                if not node.is_active:
-                    node.activate()
-                if isinstance(node, DecisionNode):
-                    action = Action(value)
-                    node = node.children[action]
-                elif isinstance(node, ChanceNode):
-                    node = node.outcomes[value]
-                else:
-                    raise ValueError('Terminal node should not be encountered on a seed trajectory')
-            self.decision_point = node
-        #
-        # Otherwise, activate the root node's children
-        #
-        else:
-            for child in self.root.children.values():
-                if not child.is_active:
-                    child.activate()
+        if self.full_solve:
+            self.root.activate_full_tree()
+            self.full_tree = True # The tree is now full
             self.decision_point = self.root
+        else:
+            #
+            # Activate the root node
+            #
+            if not self.root.is_active:
+                self.root.activate()
+            #
+            # Activate the nodes along the seed trajectory,
+            # if a seed trajectory is given.
+            #
+            if self.trajectory_seed:
+                node = self.root
+                for value in self.trajectory_seed:
+                    if not node.is_active:
+                        node.activate()
+                    if isinstance(node, DecisionNode):
+                        action = Action(value)
+                        node = node.children[action]
+                    elif isinstance(node, ChanceNode):
+                        node = node.outcomes[value]
+                    else:
+                        raise ValueError('Terminal node should not be encountered on a seed trajectory')
+                self.decision_point = node
+            #
+            # Otherwise, activate the root node's children
+            #
+            else:
+                for child in self.root.children.values():
+                    if not child.is_active:
+                        child.activate()
+                self.decision_point = self.root
 
     #
     # Update the regrets in the gadget game
@@ -555,7 +576,7 @@ class GTCFRSolver():
         # Run for a fixed number of value updates on the tree.
         #
         for i in range(math.ceil(1/self.n_expansions_per_regret_updates)):
-            """print(f'{i} / {math.ceil(1/self.n_expansions_per_regret_updates)}')"""
+            print(f'{i} / {math.ceil(1/self.n_expansions_per_regret_updates)}')
             #
             # Perform one iteration of value and strategy updates on the game tree
             #
@@ -715,12 +736,14 @@ class GTCFRSolver():
                     input_opponent_values: np.ndarray = None,
                     input_player_range: np.ndarray = None,
                     trajectory_seed: list[int] = None) -> tuple[np.ndarray, np.ndarray]:
+        start = time.time()
         #
         # Check if the weights need to be updated from shared memory
         #
         # Note: if CFVN is not using shared weights, this will do nothing
         #
-        self.cfvn.update_weights()
+        if not self.full_solve:
+            self.cfvn.update_weights()
         #
         # Initialize the game tree for cfr
         #
@@ -732,7 +755,8 @@ class GTCFRSolver():
         #
         # Return the computed strategies and values for the root node
         #
-        return np.copy(self.decision_point.cummulative_strategy()), np.copy(self.decision_point.values)
+        print(f'Solve time: {time.time() - start}')
+        return np.copy(self.decision_point.cummulative_strategy()), np.copy(self.decision_point.values)   
     
     #
     # Reset
@@ -749,7 +773,7 @@ class GTCFRAgent():
     #
     # Implement Growing Tree Counter Factual Regret (GT-CFR) algorithm
     #
-    def __init__(self, env: NolimitholdemEnv):
+    def __init__(self, env: NolimitholdemEnv, full_solve: bool =False):
         #
         # Poker environment
         #
@@ -758,7 +782,7 @@ class GTCFRAgent():
         #
         # GT-CFR Solver
         #
-        self.solver = GTCFRSolver()
+        self.solver = GTCFRSolver(full_solve=full_solve)
 
         #
         # Cap the number of moves that can be made in a self play episode

@@ -2,11 +2,8 @@
 #  Train a GT-CFR Agent  #
 # ====================== #
 
-# Debug + Testing imports
-import cProfile
-import ipdb
-
-from print_profiler_stats import print_rlcard_function_stats
+# External imports
+import numpy as np
 
 # Internal imports
 import rlcard
@@ -49,31 +46,37 @@ def main():
     #
     agent = GTCFRAgent(env)
 
-    # Profile self-play
-
-    #profiler = cProfile.Profile()
-    #profiler.enable()
+    #
+    # Load the target strategy and values matrices
+    #
+    target_strats = np.load('strat-fs-7s8s8hThJh.npy')
+    target_values = np.load('values-fs-7s8s8hThJh.npy')
 
     #
-    # Run self-play training episodes
+    # Define the error as the average absolute distance between the
+    # matrix values
     #
-    try:
+    error = lambda X, Y: np.average(np.abs(X - Y))
 
-        for episode in range(num_episodes):
-            print('=====================================================')
-            print()
-            print(f'--> Episode {episode + 1}')
-            print()
-            agent.self_play()
+    #
+    # For a set number of iterations, run solve on the starting
+    # game state and compare the results to the full solve values.
+    #
+    N_SOLVES = 10000
+    for i in range(N_SOLVES):
+        # Reset the game and the solver
+        env.reset()
+        agent.reset()
+        # Solve using GT-CFR
+        strats, values = agent.solver.solve(env.game)
+        # Compare the results to the targets
+        print()
+        print('=============================================')
+        print(f'--> Solve #{i}')
+        print(f'Strats error: {error(strats, target_strats)}')
+        print(f'Values error: {error(values, target_values)}')
+        print('=============================================')
+        print()
 
-    except Exception as e:
-        print(e)
-        #import ipdb; ipdb.post_mortem()
-
-    # Display profiler data
-    #profiler.disable()
-    #print_rlcard_function_stats(profiler)
-
-
-if __name__ == '__main__': # Needed for multiprocessing
+if __name__ == "__main__":
     main()
