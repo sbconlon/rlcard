@@ -31,6 +31,7 @@ from __future__ import annotations  # Enables forward references
 from multiprocessing import Process, Queue
 from multiprocessing.shared_memory import SharedMemory
 import numpy as np
+from queue import Full, Empty
 import tensorflow as tf
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense, Input
@@ -46,6 +47,13 @@ from rlcard.games.nolimitholdem.game import NolimitholdemGame
 
 if TYPE_CHECKING:
     from rlcard.agents.gt_cfr_agent.gt_cfr_agent import GTCFRSolver
+
+
+# NOTE - DISABLE GPU USAGE
+#tf.config.set_visible_devices([], 'GPU')
+
+# DEBUG
+MAX_QUERY_QUEUE_SIZE = 64
 
 #
 # The goal of the Counterfactual Value Network is to estimate
@@ -80,11 +88,11 @@ class CounterfactualValueNetwork:
     def __init__(self, num_players: int =2,                     # Tot. num. of players in the game
                        num_actions: int =7,                     # Tot. num. of actions in the game
                        num_neurons_per_layer: int =2048,        # Neurons per layer
-                       num_layers: int =6,                      # Num. of hidden layers
+                       num_layers: int =3,   #6,                      # Num. of hidden layers
                        activation_func: str ='relu',            # Activation function for hidden layers
-                       batch_size: int =2,                   # Batch size
+                       batch_size: int =32,                      # Batch size
                        optimizer: str ='adam',                  # Optimizer
-                       init_learning_rate: float =0.0001,       # Initial learning rate
+                       init_learning_rate: float =0.1, #=0.0001,       # Initial learning rate
                        decay_rate: float =0.5,                  # Rate at which the lr is decayed
                        decay_steps: int =int(2e6),              # Num. steps lr is decayed by decay_rate
                        policy_w: float =0.01,                   # Policy head weight
@@ -92,7 +100,7 @@ class CounterfactualValueNetwork:
                        max_replay_buffer_size: int =int(1e6),   # Max replay buffer size 
                        max_grad_updates_per_exmpl: int =10,     # Max times an exmpl can be used in the replay buffer
                        q_recursive: float =0.1,                 # Prob. of adding a recursive query to the query queue
-                       n_query_solvers: int =5,                 # Num. of procs solving querries off the query queue
+                       n_query_solvers: int =1,                 # Num. of procs solving querries off the query queue
                        input_query_queue: Queue =None,          # Input multiprocess queue
                        n_trainers: int =1,                      # Num. of procs performing batched training updates
                        use_shared_weights: bool =True,          # Use shared weights
@@ -109,12 +117,22 @@ class CounterfactualValueNetwork:
         self.values_w = values_w
 
         #
+        # Define the learning rate scheduler
+        #
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=self.init_learning_rate,
+            decay_steps=self.decay_steps,
+            decay_rate=self.decay_rate,
+            staircase=False
+        )
+
+        #
         # Initialize the optimizer
         #
         # NOTE - Right now only the adam optimizer is supported
         #
         if optimizer == 'adam':
-            self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.init_learning_rate)
+            self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
         else:
             raise f"Unsupported optimizer type: {optimizer}"
 
@@ -134,6 +152,12 @@ class CounterfactualValueNetwork:
         #
         self.data_type = np.float64
 
+        #
+        # NOTE - we need the worker processes to share the same model weights
+        #        so that they're not duplicated on the GPU and eat up all the
+        #        GPU's memory.
+        #
+        """with tf.device('/CPU:0'): # Avoid GPU out of memory errors"""
         #
         # --> Construct the MLP network
         #
@@ -186,7 +210,7 @@ class CounterfactualValueNetwork:
         # the query using gt-cfr and add the result to the replay buffer.
         #
         self.q_recursive = q_recursive # prob. of adding a recursive query to the queue
-        self.query_queue = input_query_queue if input_query_queue is not None else Queue()
+        self.query_queue = input_query_queue if input_query_queue is not None else Queue(maxsize=MAX_QUERY_QUEUE_SIZE)
 
         # We can either have 0 child processes or both query and trainer processes
         assert n_query_solvers >= 0 and n_trainers >= 0 and (n_query_solvers == 0) == (n_trainers == 0), \
@@ -556,7 +580,7 @@ class CounterfactualValueNetwork:
         #        Eventually, we will have to pass the params through as 
         #        args to query_solver_process()
         #
-        my_cvfn = CounterfactualValueNetwork(
+        my_cfvn = CounterfactualValueNetwork(
             input_query_queue=parent_query_queue, # Place recursive queries back onto the parent process's query queue
             n_query_solvers=0, # Dont spawn query solver processes
             n_trainers=0, # Dont spawn trainer processes
@@ -567,7 +591,7 @@ class CounterfactualValueNetwork:
         # Initialize this process's GT-CFR solver instance
         #
         from rlcard.agents.gt_cfr_agent.gt_cfr_agent import GTCFRSolver
-        my_solver = GTCFRSolver(input_cfvn=my_cvfn, prob_query_solve=my_cvfn.q_recursive)
+        my_solver = GTCFRSolver(input_cfvn=my_cfvn, prob_query_solve=my_cfvn.q_recursive)
         #
         # Loop indefinately...
         #
@@ -599,7 +623,7 @@ class CounterfactualValueNetwork:
                 #
                 node = my_solver.decision_point
                 is_chance_node = isinstance(node, ChanceNode)
-                input_vect = my_cvfn.to_vect(node.game, node.player_ranges, is_chance_node)
+                input_vect = my_cfvn.to_vect(node.game, node.player_ranges, is_chance_node)
                 #
                 # Reshape the target strategy and values to match the network output dimensions
                 #
@@ -609,7 +633,7 @@ class CounterfactualValueNetwork:
                 #
                 # Pad the target strategy with zeros for invalid actions
                 #
-                target_strat_padded = np.zeros((my_cvfn.num_actions, 1326))
+                target_strat_padded = np.zeros((my_cfvn.num_actions, 1326))
                 all_actions = node.game.round.get_all_actions()
                 valid_action_idxs = [all_actions.index(action) for action in node.actions]
                 for idx, padded_idx in enumerate(valid_action_idxs):
@@ -745,7 +769,7 @@ class CounterfactualValueNetwork:
     #
     # Note: the input should come from the to_vect() function.
     #
-    def query(self, input : np.ndarry, valid_action_idxs : list[Action]) -> tuple[np.ndarray]:
+    def query(self, input : np.ndarry, valid_action_idxs : list[int]) -> tuple[np.ndarray]:
         #
         # Verify that the input vector matches the dimensions of the network
         #
@@ -757,18 +781,18 @@ class CounterfactualValueNetwork:
         #
         # Format the tensorflow output back into triu numpy arrays
         #
-        np_strategy = np.zeros((self.num_actions, 52, 52))
-        idxs = np.triu_indices(52, k=1)
+        np_strategy = np.zeros((len(valid_action_idxs), 52, 52))
+        triu_idxs = np.triu_indices(52, k=1)
         # Ensure tensor output is converted to NumPy and squeezed to remove batch dimension
         tf_strategy = tf_strategy.numpy().squeeze(axis=0)  # Shape: (num_actions, 1326)
         # Map each action's strategy into the upper triangular array
-        for action in range(self.num_actions):
-            np_strategy[action][idxs] = tf_strategy[action]  # Fill upper-triangle entries
+        for idx, padded_idx in enumerate(valid_action_idxs):
+            np_strategy[idx][triu_idxs] = tf_strategy[padded_idx]  # Fill upper-triangle entries
         # Repeat for the values array
         np_values = np.zeros((self.num_players, 52, 52))
         tf_values = tf_values.numpy().squeeze(axis=0) # Shape: (num_players, 1326)
         for player in range(self.num_players):
-            np_values[player][idxs] = tf_values[player]
+            np_values[player][triu_idxs] = tf_values[player]
         #
         # Set strategy and values for invalid hands to zero.
         # A hand is considered invalid if it contains a public card.
@@ -778,10 +802,6 @@ class CounterfactualValueNetwork:
         np_values[:, :, public_card_idxs] = 0.
         np_strategy[:, public_card_idxs, :] = 0.
         np_strategy[:, :, public_card_idxs] = 0.
-        #
-        # Shrink the strategy matrix to only include valid actions
-        #
-        np_strategy = np_strategy[valid_action_idxs]
         #
         # Renormalize the strategy matrix
         #
@@ -798,7 +818,10 @@ class CounterfactualValueNetwork:
     #
     def add_to_query_queue(self, query: tuple[np.ndarray]) -> None:
         assert len(query) == 4 # [game object, opp. values, player range]
-        self.query_queue.put(query)
+        try:
+            self.query_queue.put(query, block=False)
+        except Full:
+            return
 
     #
     # Add a solved query to the replay buffer
@@ -873,12 +896,6 @@ class CounterfactualValueNetwork:
         #
         inputs, target_strats, target_values = self.get_batch_data()
         #
-        # Update the learning rate
-        #
-        num_iters = tf.keras.backend.get_value(self.optimizer.iterations)
-        learning_rate = self.init_learning_rate * (self.decay_rate ** (num_iters / self.decay_steps))
-        tf.keras.backend.set_value(self.optimizer.learning_rate, learning_rate)
-        #
         # Perform prediction and compute the total loss
         #
         with tf.GradientTape() as tape:
@@ -892,14 +909,18 @@ class CounterfactualValueNetwork:
             # Strategy loss = KL Divergence loss
             #
             strat_loss = tf.reduce_mean(
-                tf.keras.losses.KLDivergence()(target_strats, pred_strats)
+                tf.keras.losses.KLDivergence(reduction='none')(tf.expand_dims(target_strats, -1), 
+                                                                tf.expand_dims(pred_strats, -1))
             )
+            print(f'Batch strat loss {strat_loss}')
             #
             # Value loss = Huber loss
             #
             value_loss = tf.reduce_mean(
-                tf.keras.losses.Huber()(target_values, pred_values)
+                tf.keras.losses.Huber(reduction='none')(tf.expand_dims(target_values, -1), 
+                                                        tf.expand_dims(pred_values, -1))
             )
+            print(f'Value loss {value_loss}')
             #
             # Total loss, weighted sum.
             #

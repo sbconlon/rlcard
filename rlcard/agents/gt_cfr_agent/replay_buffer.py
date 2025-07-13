@@ -132,6 +132,14 @@ class ReplayBuffer:
     #
     def _evict(self, idx):
         #
+        # Remember the weight we are removing
+        #
+        dead_weight = (
+            self.cum_weights[idx] - self.cum_weights[idx-1] if 
+            idx != 0 else 
+            self.cum_weights[idx]
+        )
+        #
         # Delete the item from memory
         #
         del self.buffer[idx]
@@ -144,7 +152,8 @@ class ReplayBuffer:
         # from all cum_weights after the item.
         #
         for i in range(idx, len(self.cum_weights)):
-            self.cum_weights[i] -= 1 / (self.sample_counts[i] + 1)
+            assert self.cum_weights[i] > dead_weight, f'Weights must be strictly positive:'
+            self.cum_weights[i] -= dead_weight
 
     #
     # Sample a fixed number of elements in the buffer.
@@ -164,6 +173,10 @@ class ReplayBuffer:
         #
         if len(self.buffer) == 0:
             raise IndexError("Buffer is empty")
+        if len(self.buffer) < batch_size:
+            raise IndexError(
+                f"Insufficient buffer size ({len(self.buffer)}) for desired batch size ({batch_size})"
+            )
         #
         # Generate batch indices using binary search
         #
@@ -193,7 +206,7 @@ class ReplayBuffer:
             #
             idx = bisect_left(self.cum_weights, rand_val)
             #
-            # If the index is unique...
+            # If the index has already been sampled...
             #
             if idx not in sampled_idxs:
                 #
@@ -208,17 +221,14 @@ class ReplayBuffer:
                 # Update weights
                 #
                 self.sample_counts[idx] += 1
-                #
-                # If this item has been sampled too many times,
-                # then evict it.
-                #
-                if self.sample_counts[idx] >= self.max_samples:
-                    self._evict(idx)
-                #
-                # Else, update the sample weights for this element.
-                #
-                else:
-                    self._update_weights(idx)
+                self._update_weights(idx)
+        #
+        # Check if a sampled item has been sampled too many times,
+        # then evict it.
+        #
+        for sidx in sorted(sampled_idxs, reverse=True):
+            if self.sample_counts[sidx] >= self.max_samples:
+                self._evict(sidx)
         return samples
 
     #

@@ -783,6 +783,8 @@ class DecisionNode(CFRNode):
     # Return the average strategy across strategy updates
     #
     def cummulative_strategy(self):
+        if self.n_strategy_updates == 0:
+            raise ValueError('Computing cummulative strategy before any strategy updates have been performed.')
         cum_strategy = self.accumulate_strategy / self.n_strategy_updates
         # Renormalize
         denom = cum_strategy.sum(axis=0, keepdims=True)
@@ -856,6 +858,8 @@ class DecisionNode(CFRNode):
         # Invalid hands are assigned a uniform policy above.
         # Mask them out.
         #
+        tril_idxs = np.tril_indices(52)
+        self.strategy[:, tril_idxs[0], tril_idxs[1]] = 0.
         public_card_idxs = [card.to_int() for card in self.game.public_cards]
         for cid in public_card_idxs:
             self.strategy[:, cid, :] = 0.
@@ -1035,8 +1039,16 @@ class DecisionNode(CFRNode):
                 #
                 #        In the future, we should only store the information
                 #        needed to reconstruct the game state.
+                #querries.append((self.game, opponent_values, player_range, [action.value]))
                 #
-                querries.append((self.game, opponent_values, player_range, [action.value]))
+                # NOTE - Testing giving the network the child game directly
+                #
+                child_pid = child.game.game_pointer
+                child_opp = (child_pid + 1) % 2
+                querries.append((child.game, 
+                                 child.values[child_opp],
+                                 child.player_ranges[child_pid],
+                                 []))
             #
             # Use the child's values to update the parent's values
             #

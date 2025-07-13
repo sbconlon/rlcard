@@ -21,7 +21,7 @@ def main():
     #
     # Training parameters
     #
-    num_episodes = 25
+    num_episodes = 1
 
     #
     # Initialize nolimit holdem environment
@@ -37,6 +37,12 @@ def main():
 
                 'starting_stage': 'river',
                 'chips_for_each': 10,
+                #
+                # Allowed, non-default actions:
+                #   - BET_HALF_POT
+                #   - BET_2_POT
+                #   - RAISE_2X
+                #
                 'disabled_actions': {Action.BET_POT,
                                      Action.BET_5POT,
                                      Action.RAISE_3X,
@@ -50,29 +56,23 @@ def main():
     agent = GTCFRAgent(env)
 
     # Profile self-play
-
-    #profiler = cProfile.Profile()
-    #profiler.enable()
+    profiler = cProfile.Profile()
+    profiler.enable()
 
     #
     # Run self-play training episodes
     #
-    try:
-
-        for episode in range(num_episodes):
-            print('=====================================================')
-            print()
-            print(f'--> Episode {episode + 1}')
-            print()
-            agent.self_play()
-
-    except Exception as e:
-        print(e)
+    for episode in range(num_episodes):
+        print('=====================================================')
+        print()
+        print(f'--> Episode {episode + 1}')
+        print()
+        agent.self_play()
         #import ipdb; ipdb.post_mortem()
 
     # Display profiler data
-    #profiler.disable()
-    #print_rlcard_function_stats(profiler)
+    profiler.disable()
+    print_rlcard_function_stats(profiler)
 
 
 if __name__ == '__main__': # Needed for multiprocessing

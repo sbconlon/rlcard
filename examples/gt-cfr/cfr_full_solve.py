@@ -34,7 +34,8 @@ def main():
                 'disabled_actions': {Action.BET_POT,
                                      Action.BET_5POT,
                                      Action.RAISE_3X,
-                                     Action.RAISE_5X}
+                                     Action.RAISE_5X},
+                'dealer_id': 0 # Fix Player 0 as the dealer
     }
     env = rlcard.make('no-limit-holdem', config=config)
 
@@ -43,7 +44,7 @@ def main():
     #
     env.reset()
     agent = GTCFRAgent(env, full_solve=True)
-    agent.solver.n_expansions_per_regret_updates = 1/100000
+    agent.solver.n_expansions_per_regret_updates = 1/10000
     agent.solver.solve(env.game)
     np.save('strat-fs-7s8s8hThJh.npy', agent.solver.root.strategy)
     np.save('values-fs-7s8s8hThJh.npy', agent.solver.root.values)
