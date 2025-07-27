@@ -15,8 +15,6 @@ from rlcard.games.base import Card
 from rlcard.games.nolimitholdem.round import Action
 
 
-
-
 def main():
     #
     # Training parameters
@@ -55,10 +53,11 @@ def main():
     #
     agent = GTCFRAgent(env)
 
+    """
     # Profile self-play
     profiler = cProfile.Profile()
     profiler.enable()
-
+    """
     #
     # Run self-play training episodes
     #
@@ -69,11 +68,11 @@ def main():
         print()
         agent.self_play()
         #import ipdb; ipdb.post_mortem()
-
+    """
     # Display profiler data
     profiler.disable()
     print_rlcard_function_stats(profiler)
-
+    """
 
 if __name__ == '__main__': # Needed for multiprocessing
     main()

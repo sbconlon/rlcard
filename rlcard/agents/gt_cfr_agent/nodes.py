@@ -21,16 +21,499 @@ from abc import ABC, abstractmethod
 import copy
 from itertools import permutations, combinations
 import numpy as np
+import tensorflow as tf
 #import cupy as np
 #from sparse import COO
 import treys
 
 # Internal imports
+from rlcard.games.base import Card
 from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork
+from rlcard.agents.gt_cfr_agent.utils import random_strategy, get_1d_coor
 from rlcard.games.limitholdem import PlayerStatus
 from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
 from rlcard.games.nolimitholdem.round import Action
 from rlcard.utils.utils import init_standard_deck
+
+
+class CFRTree:
+    #
+    # Initializes an empty game tree
+    #
+    # Inputs:
+    # 
+    #    - n_players = num. of players in the game
+    #
+    #    - total_actions = total number of all possible actions
+    #
+    def __init__(self, n_players: int=2):
+        #
+        # Store the number of players and actions
+        #
+        self.n_players = n_players
+        self.all_actions = []
+        #
+        # Counts the number of nodes in the tree
+        #
+        self.n_nodes = 0
+        #
+        # Game tree
+        #
+        #   - Adjacency matrix
+        #
+        #   - tree[i, j] = action id if node j is a descendant of node i otherwise -1
+        #
+        #   - Example
+        #
+        #            D
+        #      T     T    T
+        #
+        #      tree = [ -1  0  1  2 ]
+        #             [ -1 -1 -1 -1 ]
+        #             [ -1 -1 -1 -1 ]
+        #             [ -1 -1 -1 -1 ]
+        #
+        #      Nodes 1, 2, 3 are terminal nodes and descendants of Node 0.
+        #
+        self.tree = np.array([], dtype=np.int32)
+        #
+        # Node types
+        #
+        #   - Vector of length = # of nodes
+        #
+        #   - node_types[i] = 0 if node i is a decision node
+        #                     1 if node i is a terminal node
+        #
+        #   - Example
+        #
+        #           D
+        #     T     T    T
+        #
+        #     node_types = [0, 1, 1, 1]
+        #
+        #     Nodes 1, 2, 3 are terminal nodes and descendants of Node 0.
+        #
+        self.node_types = np.array([], dtype=np.int8)
+        #
+        # Game states
+        #
+        #   - Vector of length = # of nodes
+        #
+        #   - game_states[i] = game state object for node i
+        #
+        self.game_states: list[NolimitholdemGame]
+        self.game_states = []
+        #
+        # Activate nodes
+        #
+        #    - Vector of length = # of nodes
+        #
+        #    - active_nodes[i] = boolean whether node i is active
+        #
+        self.active_nodes = np.array([], dtype=np.bool_)
+        #
+        # Range map
+        #
+        #   - Matrix of size (# nodes, # of players)
+        #
+        #   - range_map[i, j] = idx for the range vector associated with 
+        #                       player j at node i.
+        #
+        self.range_map = np.array([], dtype=np.int8)
+        #
+        # Ranges
+        #
+        #   - Matrix of size (# of decision nodes + # of players, # of hands)
+        #
+        #   - NOTE: 1326 is the number of distinct hands
+        #
+        #   - ranges[range_map[i, j], k] = prob. of player j reaching node i with hand k
+        #
+        self.ranges = np.array([], dtype=np.float32)
+        #
+        # Values
+        #
+        #   - Matrix of size (# of nodes, # of player, # of hands)
+        #
+        #   - values[i, j, k] = expected value of player j having hand k in node i
+        #
+        self.values = np.array([], dtype=np.float32)
+        #
+        # Strategy indexes
+        #
+        #    - Matrix of size = (# of nodes, total # of actions)
+        #
+        #    - strat_idxs[i, j] = 
+        #       
+        #        If action j is a valid action at node i,
+        #        then it's the row id into the strategy matrix
+        #
+        #        Otherwise, -1.
+        #
+        self.strat_idxs = np.array([[]], dtype=np.int8)
+        #
+        # Strategies
+        #
+        #    - Matrix size = (Approx. # of decision nodes * # of actions, # of hands)
+        #
+        #    - strategies[strat_idxs[i], j, k] 
+        #         = prob. of player at node i selecting action j with hand k
+        #
+        self.strategies = np.array([[]], dtype=np.float32)
+        #
+        # Board string to payoff idx
+        #
+        #   - Dictionary that maps board strings to idxs in the payoff matrix 
+        #
+        #   - board_to_idx[board_str] = row id into the payoff matrix
+        #
+        #   - If board_str is not in the dictionary, then the payoff has not
+        #     been cached yet.
+        #
+        self.board_to_idx = {}
+        #
+        # Payoff indexes
+        #
+        #   - Vector of size = # of nodes
+        #
+        #   - playoffs_idxs[i] =
+        #
+        #       If node i is a terminal node with a showdown,
+        #       then node i row id into the payoff matrix.
+        #
+        #       -1 otherwise.
+        #
+        self.payoffs_idxs = np.array([], dtype=np.int8)
+        #
+        # Payoffs
+        #
+        #   - Matrix size = (# of distinct payoffs, # of players, # of hands, # of hands)
+        #
+        #   - payoffs[payoffs_idxs[x], i, j, k]
+        #       = payoff to player i at node x when holding hand j against hand k
+        #
+        self.payoffs = np.array([], dtype=np.float32)
+    
+    #
+    # Creates the root node
+    #
+    def add_root_node(self, game_state: NolimitholdemGame, 
+                            player_ranges: np.ndarray) -> None:
+        #
+        # Sanity checks
+        #
+        assert self.n_nodes == 0, f"Trying to add a root node to a tree with {self.n_nodes} nodes."
+        assert player_ranges.shape == (self.n_players, 1326), f"Expected {(self.n_players, 1326)}, Got {player_ranges.shape}"
+        #
+        # Set all the actions
+        #
+        self.all_actions = game_state.get_all_actions()
+        #
+        # Set internal matrices
+        #
+        self.tree = np.array([[-1]], dtype=np.int32) # nodes are never descendants of themselves
+        self.node_types = np.array([0], dtype=np.int8) # all root nodes are decision nodes
+        self.game_states.append(game_state)
+        self.active_nodes = np.array([False], dtype=np.bool_)
+        self.range_map = np.array([np.arange(self.n_players)], dtype=np.int8)
+        self.ranges = player_ranges
+        self.values = np.zeros((1, self.n_players, 1326))
+        legal_actions = [self.all_actions.index(action) for action in game_state.get_legal_actions()]
+        self.strategies = random_strategy(len(legal_actions), game_state.public_cards)
+        root_strat_idxs = [-1] * len(self.all_actions)
+        for idx, action in enumerate(legal_actions):
+            root_strat_idxs[action] = idx
+        self.strat_idxs = np.array([root_strat_idxs], dtype=np.int8)
+        self.payoffs_idxs = np.array([-1], dtype=np.int8)
+        #
+        # Increment node count
+        #
+        self.n_nodes += 1
+
+    #
+    # Adds a decision node to the game tree
+    #
+    # Inputs
+    #
+    #    - parent (int) = node id of the parent of the new node.
+    #
+    def add_child(self, parent_id: int, action_id: int) -> None:
+        #
+        # Get the child game state
+        #
+        assert 0 <= parent_id < self.n_nodes, f"Invalid parent id: {parent_id}"
+        parent_game = self.game_states[parent_id]
+        action = Action(action_id)
+        assert action in parent_game.get_legal_actions()
+        child_game = copy.deepcopy(parent_game)
+        child_game.step(action)
+        #
+        # Determine the node type for the child
+        #
+        child_type = None
+        if child_game.is_over():
+            child_type = 1 # Terminal node
+        elif (parent_game.stage != parent_game.stage and 
+            not child_game.stage in (Stage.END_HIDDEN, Stage.SHOWDOWN)):
+            child_type = 2 # Chance node
+        elif child_game.stage in (Stage.PREFLOP, Stage.FLOP, Stage.TURN, Stage.RIVER):
+            child_type = 0 # Decision node
+        #
+        # Add child to the tree matrix
+        #
+        new_column = np.ones((self.n_nodes, 1)) * -1
+        self.tree = np.hstack([self.tree, new_column])
+        new_row = np.ones(self.n_nodes+1) * -1
+        self.tree = np.vstack([self.tree, new_row])
+        self.tree[parent_id, self.n_nodes] = action_id
+        #
+        # Add child to node types
+        #
+        self.node_types = np.append(self.node_types, child_type)
+        #
+        # Add child to game states
+        #
+        self.game_states.append(child_game)
+        #
+        # Add child to active nodes
+        #
+        # Note - terminal nodes are always considered active
+        #
+        self.active_nodes = np.append(self.active_nodes, child_type == 1)
+        #
+        # Add child range
+        #
+        child_id = self.n_nodes
+        player_id = child_game.game_pointer
+        action_idx = self.all_actions.index(action)
+        child_range_idxs = self.range_map[parent_id]
+        self.range_map = np.vstack([self.range_map, child_range_idxs])
+        parent_range_idx = self.range_map[parent_id, player_id]
+        parent_strat_idx = self.strat_idxs[parent_id, action_idx]
+        child_range = self.strategies[parent_strat_idx] * self.ranges[parent_range_idx]
+        self.ranges = np.vstack([self.ranges, child_range])
+        self.range_map[child_id, player_id] = self.ranges.shape[0] - 1
+        #
+        # Add child values
+        #
+        child_values = np.zeros((1, self.n_players, 1326))
+        self.values = np.concatenate([self.values, child_values], axis=0)
+        #
+        # Add strategy
+        #
+        self.strat_idxs = np.vstack([self.strat_idxs, [-1]*len(self.all_actions)])
+        if child_type == 0: # Decision node
+            legal_actions = [self.all_actions.index(action) for action in child_game.get_legal_actions()]
+            child_strategy = random_strategy(len(legal_actions), child_game.public_cards)
+            base = self.strategies.shape[0]
+            self.strategies = np.concatenate([self.strategies, child_strategy], axis=0)
+            for offset, action in enumerate(legal_actions):
+                self.strat_idxs[child_id, action] = base + offset
+        #
+        # Add payoffs
+        #
+        if child_type == 1: # Terminal node
+            num_active = sum([p.status != PlayerStatus.FOLDED for p in child_game.players])
+            if num_active > 1: # Showdown
+                board_str = five_cards_to_str(child_game.public_cards)
+                if board_str in self.board_to_idx: # Cache hit
+                    self.payoffs_idxs = np.append(self.payoffs_idxs, self.board_to_idx[board_str])
+                else: # Cache miss
+                    payoff_matrix = compute_payoff_matrix(child_game)
+                    payoff_matrix = np.expand_dims(payoff_matrix, axis=0)
+                    if self.payoffs:
+                        self.payoffs = np.concatenate([self.payoffs, payoff_matrix], axis=0)
+                    else:
+                        self.payoffs = payoff_matrix
+                    self.payoffs_idxs = np.append(self.payoffs_idxs, self.payoffs.shape[0]-1)
+                    self.board_to_idx[board_str] = self.payoffs_idxs[child_id]
+            else: # No showdown
+                self.payoffs_idxs = np.append(self.payoffs_idxs, -1)
+        else: # None terminal node
+            self.payoffs_idxs = np.append(self.payoffs_idxs, -1)
+        #
+        # Update node count
+        #
+        self.n_nodes += 1
+    
+    #
+    # Active nodes are considered part of the tree.
+    #
+    # All their children are added to the tree as non-active nodes.
+    #
+    def activate(self, node_id: int):
+        # Validate input
+        assert 0 <= node_id < self.n_nodes, f"Invalid node id {node_id}"
+        assert self.node_types[node_id] == 0, "Only decision nodes can be activated"
+        assert not self.active_nodes[node_id], "Node is already active"
+        # Activate the node
+        self.active_nodes[node_id] = True
+        # Add the node's children to the tree
+        game = self.game_states[node_id]
+        legal_action_ids = [action.value for action in game.get_legal_actions()]
+        for action_id in legal_action_ids:
+            self.add_child(node_id, action_id)
+
+    #
+    # Activate the children of a given node
+    #
+    def activate_children(self, node_id: int):
+        # Validate input
+        assert 0 <= node_id < self.n_nodes, f"Invalid node id {node_id}"
+        assert self.node_types[node_id] == 0, "Only decision nodes can be activated"
+        assert self.active_nodes[node_id], "Node is not already active"
+        # Activate the children
+        for child_id in np.where(self.tree[node_id, :] >= 0)[0]:
+            if self.node_types[child_id] == 0 and not self.active_nodes[child_id]:
+                self.activate(child_id)
+
+    #
+    # One iteration of CFR
+    #
+    # Assumption - child nodes are always below their parents in the tree matrix
+    #              i.e. child row id > parent row id
+    #
+    def update_values(self):
+        #
+        # Downward pass - propagate range probabilities
+        #
+        for parent in range(self.n_nodes):
+            player = self.game_states[parent].game_pointer # NOTE - This could be replaced by a "owner" vector
+            for child in np.where(self.tree[parent, :] >= 0)[0]:
+                action = self.all_actions.index(self.tree[parent, child]) # NOTE - This is bad
+                self.ranges[self.range_map[child, player], :] = self.ranges[self.range_map[parent, player], :] * self.strategies[self.strat_idxs[parent, action], :]
+        #
+        # Upward pass - bubble up expected values
+        #
+        
+
+
+
+#####################################
+#                                   #
+#     Payoff Helper Functions       #
+#                                   #
+##################################### 
+
+#
+# Helper function - Returns a unique string for the given
+#                   5 card list, independent of card order.
+#
+def five_cards_to_str(board: list[Card]) -> str:
+    assert len(board) == 5, "Only compute payoffs for river showdowns"
+    output = ''
+    for card in sorted(board, key=lambda c: c.to_int()):
+        output += str(card)
+    return output
+                    
+#
+# Helper function - Computes the payoff matrix for a given
+#                   terminal showdown game.
+#
+def compute_payoff_matrix(game: NolimitholdemGame) -> np.ndarray:
+    #
+    # Deck of trey cards
+    #
+    deck = sorted(init_standard_deck(), key=lambda x: x.to_int()) 
+    trey_deck = [card.to_treys() for card in deck]
+    community_cards = [card.to_treys() for card in game.public_cards]
+    community_idxs = [card.to_int() for card in game.public_cards]
+
+    #
+    # Useful for converting from 1d coor to 2d corrs
+    #
+    # upper_i[hand_idx] = card1 idx
+    # upper_j[hand_idx] = card2 idx
+    #
+    upper_i, upper_j = np.triu_indices(52, k=1)
+
+    #
+    # Get a vector of hand ranks
+    #
+    evaluator = treys.Evaluator()
+    hand_evals = np.ones(1326) * np.inf
+    for hand in range(1326):
+        x, y = upper_i[hand], upper_j[hand]
+        if x in community_idxs or y in community_idxs:
+            continue
+        hand_evals[hand] = evaluator.evaluate(community_cards, [trey_deck[x], trey_deck[y]])
+
+    # Vectorized version of get_hand_payoff
+    def get_hand_payoff(pid, hand1, hand2):
+        """
+        Compute the payoff of a poker hand matchup in a vectorized manner.
+        """
+        # Get the 2d coors for the hand idxs
+        h1_card1, h1_card2 = upper_i[hand1], upper_j[hand1]
+        h2_card1, h2_card2 = upper_i[hand2], upper_j[hand2]
+
+        # Check 1: Card overlap between hands
+        has_overlap = (
+            (h1_card1 == h2_card1) |
+            (h1_card1 == h2_card2) |
+            (h1_card2 == h2_card1) |
+            (h1_card2 == h2_card2)
+        )
+
+        # Check 2: Community cards
+        has_community_cards = (
+            np.isin(h1_card1, community_cards) |
+            np.isin(h1_card2, community_cards) |
+            np.isin(h2_card1, community_cards) |
+            np.isin(h2_card2, community_cards)
+        )
+
+        # Valid hands pass both checks
+        valid_hands = ~(has_overlap | has_community_cards)
+
+
+        # Compare hand strengths using precomputed `hand_evals`
+        # NOTE - not using equality here, in the case of draws we want the payoff to remain zero.
+        player1_wins = hand_evals[hand1] < hand_evals[hand2]
+        player2_wins = hand_evals[hand1] > hand_evals[hand2]
+
+        # Initialize payoff vector
+        payoffs = np.zeros_like(hand1, dtype=np.float64)  # Default all payoffs to 0
+
+        # Assign the winning hands 1s and losing hands -1s
+        payoffs = np.where(
+            player1_wins & valid_hands, 
+            np.where(pid==0, 1, -1),
+            payoffs
+        )
+
+        payoffs = np.where(
+            player2_wins & valid_hands, 
+            np.where(pid==1, 1, -1), 
+            payoffs
+        )
+
+        return payoffs
+
+    #
+    # Define shape
+    #
+    shape = [game.num_players] + [1326] * game.num_players
+
+    #
+    # Apply vectorized function
+    #
+    # Note - np.fromfunction applies the function to the indices of the result array.
+    #
+    #        So, payoffs[i, j, k, l] = get_hand_payoff(i, j, k, l)
+    #
+    #        where payoffs.shape = shape (as defined above)
+    #
+    payoffs = np.fromfunction(lambda pid, hand1, hand2: get_hand_payoff(pid.astype(int), 
+                                                                        hand1.astype(int),
+                                                                        hand2.astype(int)), 
+                                                                        shape, dtype=np.float64)
+    
+    return payoffs
+
+
+
+
 
 #
 # Abstract base class for a node in the CFR public tree
@@ -1165,7 +1648,7 @@ class DecisionNode(CFRNode):
             #
             child_node = ChanceNode(copy.deepcopy(self.game), child_ranges)
         #
-        # Case 4 - Child is a Decision Node
+        # Case 3 - Child is a Decision Node
         #
         # NOTE - doing the stage check to exlude 'END_HIDDEN'
         #

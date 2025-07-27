@@ -47,7 +47,7 @@ def main():
                 'dealer_id': 0 # Fix player 1 as the dealer
     }
     env = rlcard.make('no-limit-holdem', config=config)
-
+    """import ipdb; ipdb.set_trace()"""
     #
     # Initialize the GT-CFR Agent
     #

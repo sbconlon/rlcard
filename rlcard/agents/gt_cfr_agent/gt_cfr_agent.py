@@ -2,6 +2,7 @@ from __future__ import annotations  # Enables forward references
 
 # External imports
 import copy
+import gc
 import math
 import numpy as np
 import random
@@ -10,7 +11,7 @@ import time
 from typing import TYPE_CHECKING
 
 # Internal imports
-from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode, ChanceNode
+from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode, ChanceNode, CFRTree
 from rlcard.agents.gt_cfr_agent.utils import uniform_range, random_range, starting_hand_values
 from rlcard.envs.nolimitholdem import NolimitholdemEnv
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
@@ -40,6 +41,7 @@ class GTCFRSolver():
                        full_solve: bool =False,
                        n_trainers: int =1,
                        n_query_solvers: int =1,
+                       total_actions: int =3,
         ):
         # Import at runtime
         from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork
@@ -87,7 +89,10 @@ class GTCFRSolver():
         #
         # Set to None upon class initialization.
         #
-        self.root = None
+        self.tree = None
+        #
+        # Boolean whether to fully expand the tree or not.
+        #
         self.full_tree = self.full_solve
         #
         # Decision point
@@ -209,12 +214,12 @@ class GTCFRSolver():
         # Allocate memory for the player ranges,
         # initialized to zero.
         #
-        nplayers = input_game.num_players
-        ranges = np.zeros((nplayers, 52, 52))
+        n_players = input_game.num_players
+        ranges = np.zeros((n_players, 1326))
         #
         # For each player in the game...
         #
-        for pid in range(nplayers):
+        for pid in range(n_players):
             #
             # If this player is the acting player,
             # then assign the input range to them.
@@ -294,7 +299,7 @@ class GTCFRSolver():
         #
         # Case 1 - No starting information
         #
-        if all(x is None for x in (self.root, input_opponent_values, input_player_range, trajectory_seed)):
+        if all(x is None for x in (self.tree, input_opponent_values, input_player_range, trajectory_seed)):
             #
             # Assume the decision player's range at the root state is
             # distributed uniformly over possible hands.
@@ -309,7 +314,8 @@ class GTCFRSolver():
             # NOTE - Do we need this to be a deepcopy?
             #        Nothing should be editing the game state while we solve.
             #
-            self.root = DecisionNode(copy.deepcopy(input_game), player_ranges)
+            self.tree = CFRTree()
+            self.tree.add_root_node(copy.deepcopy(input_game), player_ranges)
             self.full_tree = False
             #
             # Initialize the gadget game
@@ -321,7 +327,7 @@ class GTCFRSolver():
             self.trajectory_seed = []
             """
             # DEBUG - Activate the full game tree for debugging purpuses
-            self.root.activate_full_tree()
+            #self.root.activate_full_tree()
             """
         #
         # Case 2 - Existing game tree. No input player range or opponent values.
@@ -339,7 +345,7 @@ class GTCFRSolver():
             #        however, the tree will grow too large after too many successive solves, resulting
             #        in too slow of execution.
             #
-            self.root = DecisionNode(result.game, result.player_ranges)
+            self.tree.add_root_node(result.game, result.player_ranges)
             #
             # Take the opponent's values from the prior solve iteration to be the gadget values
             #
@@ -348,7 +354,7 @@ class GTCFRSolver():
             pid = input_game.game_pointer
             self.init_gadget_game(input_game, input_opponents_values=np.copy(result.values[(pid+1) % 2]))
             #
-            # If the trajectory of root node differs from the
+            # If the trajectory of the root node differs from the
             # input game state, then store the difference as the trajectory seed.
             #
             assert len(input_game.trajectory) >= len(self.root.game.trajectory)
@@ -366,7 +372,7 @@ class GTCFRSolver():
             #
             # NOTE - Same as Case 1, not sure if this needs to be a deepcopy.
             #
-            self.root = DecisionNode(copy.deepcopy(input_game), player_ranges)
+            self.tree.add_root_node(copy.deepcopy(input_game), player_ranges)
             self.full_tree = False
             #
             # Initialize the gadget game with the opponent's values
@@ -400,14 +406,18 @@ class GTCFRSolver():
             #
             # Activate the root node
             #
-            if not self.root.is_active:
-                self.root.activate()
+            # NOTE - root node id is always zero
+            #
+            if not self.tree.active_nodes[0]:
+                self.tree.activate(0)
             #
             # Activate the nodes along the seed trajectory,
             # if a seed trajectory is given. Then, set
             # the decision point node.
             #
             if self.trajectory_seed:
+                """TODO - Unimplemented"""
+                assert(False)
                 node = self.root
                 for value in self.trajectory_seed:
                     # Get next node in the trajectory
@@ -426,13 +436,13 @@ class GTCFRSolver():
             # Otherwise, the root node is the decision point
             #
             else:
-                self.decision_point = self.root
+                self.decision_point = 0 # root node id
             #
             # Active the decision point's children
             #
-            for child in self.decision_point.children.values():
-                if not child.is_active:
-                    child.activate()
+            self.tree.activate_children(self.decision_point)
+            import ipdb; ipdb.set_trace()
+
 
     #
     # Update the regrets in the gadget game
@@ -742,8 +752,10 @@ class GTCFRSolver():
         # Check starting game tree
         # We start with a root node and its children
         #
-        assert self.root, "The game tree needs to be initialized before GT-CFR is ran"
+        assert self.tree, "The game tree needs to be initialized before GT-CFR is ran"
+        """NOTE - not currently implemented
         assert all([self.root.children[a] for a in self.root.actions]), "Ill-formatted initial tree"
+        """
         #
         # Run gt-cfr
         #
@@ -783,7 +795,9 @@ class GTCFRSolver():
     #
     def reset(self) -> None:
         # Remove the game tree
-        self.root, self.decision_point = None, None
+        self.tree, self.decision_point = None, None
+        # Trigger Python garbage collection
+        gc.collect() 
 
 #
 # This function handles the self-play loop that uses the GT-CFR solver 
@@ -807,7 +821,8 @@ class GTCFRAgent():
             n_expansions_per_regret_update=n_expansions_per_regret_update,
             full_solve=full_solve, 
             n_trainers=n_trainers, 
-            n_query_solvers=n_query_solvers
+            n_query_solvers=n_query_solvers,
+            total_actions = env.game.get_num_actions()
         )
         #
         # Cap the number of moves that can be made in a self play episode

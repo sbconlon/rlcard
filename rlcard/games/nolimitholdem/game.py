@@ -408,3 +408,6 @@ class NolimitholdemGame(Game):
             (int): The number of actions.
         """
         return len(Action) - len(self.disabled_actions)
+    
+    def get_all_actions(self):
+        return self.round.get_all_actions()
