@@ -41,12 +41,17 @@ class CFRTree:
     # Initializes an empty game tree
     #
     # Inputs:
-    # 
+    #
+    #    - cfvn = neural network used to approx. strategies and values
+    #  
     #    - n_players = num. of players in the game
     #
-    #    - total_actions = total number of all possible actions
     #
-    def __init__(self, n_players: int=2):
+    def __init__(self, cfvn: CounterfactualValueNetwork, n_players: int=2):
+        #
+        # Store the counterfactual value network
+        #
+        self.cfvn = cfvn
         #
         # Store the number of players and actions
         #
@@ -385,9 +390,41 @@ class CFRTree:
         #
         # Upward pass - bubble up expected values
         #
-        
-
-
+        for node in range(self.n_nodes-1, -1, -1):
+            # Decision node
+            if self.node_types[node] == 0: 
+                player = self.game_states[node].game_pointer # NOTE - Could be replaced
+                action_idxs = self.tree[np.where(self.tree[node] != -1)] # NOTE - This is bad
+                actions = np.array([self.all_actions.index(a) for a in action_idxs])
+                # Active
+                if self.active_nodes[node]:
+                    # Update player
+                    strat = self.strategies[self.strat_idxs[player, actions], :] # shape = (num. of actions, 1326)
+                    children = np.where(self.tree[node] != -1)
+                    child_values = self.values[children, player, :] # shape = (num. of actions, 1326)
+                    self.values[node, player, :] = np.sum(strat * child_values, axis=0)
+                    # Update opponent
+                    opponent = (player + 1) % 2
+                    self.values[node, opponent, :] = np.sum(self.values[children, opponent, :], axis=0)
+                    # Update strategy
+                    ... #TODO
+                # Non-active (NOTE - should do something with this section later)
+                else:
+                    vect = self.cfvn.to_vect(self.game_states[node], 
+                                             self.ranges[self.range_map[node, :], :])
+                    strat, vals = self.cfvn.query(vect, actions)
+                    self.strategies[self.strat_idxs[node, actions], :] = strat
+                    self.values[node, opponent, :] = vals
+            # Terminal node
+            elif self.node_types[node] == 1:
+                # Non-showdown
+                if ...: # TODO
+                    ... # TODO
+                # Showdown
+                else:
+                    ... # TODO
+            
+                    
 
 #####################################
 #                                   #
