@@ -259,7 +259,7 @@ class NolimitholdemGame(Game):
 
         return state, self.game_pointer
 
-    def get_legal_actions(self):
+    def get_legal_actions(self) -> list[Action]:
         """
         Return the legal actions for current player
 

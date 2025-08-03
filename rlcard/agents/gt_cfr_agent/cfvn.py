@@ -40,7 +40,7 @@ import time
 
 # Internal imports
 from rlcard.agents.gt_cfr_agent.replay_buffer import ReplayBuffer
-from rlcard.agents.gt_cfr_agent.utils import normalize_columns
+from rlcard.agents.gt_cfr_agent.utils import normalize_columns, get_card_coors
 from rlcard.agents.gt_cfr_agent.rwlock import ReadRWLock, WriteRWLock, ReadWriteLock
 from rlcard.games.nolimitholdem.round import Action
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
@@ -700,7 +700,7 @@ class CounterfactualValueNetwork:
     # Note: These are the features used in the literature. Other features could be
     #       explored in the future.
     #
-    def to_vect(self, game : NolimitholdemGame, ranges : np.ndarray, chance_actor : bool):
+    def to_vect(self, game : NolimitholdemGame, ranges : np.ndarray, chance_actor : bool=False):
         #
         # All elements of the returned vector must be of the same type.
         #
@@ -728,24 +728,9 @@ class CounterfactualValueNetwork:
         #
         # --> Featurize player ranges
         #
-        # The input range for each player is a 52x52 upper triangular matrix
-        # with zeros across the diagonal.
-        #
-        # Each of these matrices needs to be flattened into 1326 vector.
-        #
-        # Note: These matrices have at most 1326 non-zero entries, 
-        #       matching our expected vector size.
-        #
-        #       Upper triangular matrix elements = 52*(52+1)/2 = 1378 non-zero elems
-        #       
-        #       Exluding diagonal entries = 1378 - 52 = 1326 non-zero elems = num. hand combos 
-        #
         assert self.num_players == game.num_players, "Game state and network num players mismatch"
-        assert ranges.shape == (self.num_players, 52, 52), "Unrecognized player range shape"
-        range_vect = np.zeros(1326*game.num_players, dtype=self.data_type)
-        triu_indices = np.triu_indices(52, k=1) # indicies of elems in the upper triangular matrix
-        for pid in range(game.num_players):
-            range_vect[1326*pid:1326*(pid+1)] = ranges[pid][triu_indices]
+        assert ranges.shape == (self.num_players, 1326), "Unrecognized player range shape"
+        range_vect = ranges.ravel() # flatten
         #
         # --> Concat the game and range features into a single feature vector
         #
@@ -769,49 +754,44 @@ class CounterfactualValueNetwork:
     #
     # Note: the input should come from the to_vect() function.
     #
-    def query(self, input : np.ndarry, valid_action_idxs : list[int]) -> tuple[np.ndarray]:
+        #
+    # Run inference
+    #
+    # Given a batch of input vectors encoding game states and
+    # player ranges at the game state, return the policy
+    # for the acting player and values for the players.
+    #
+    # valid_actions - list of valid actions for the acting player
+    #
+    # Note: the input should come from the to_vect() function.
+    #
+    def query(self, input : np.ndarry) -> tuple[np.ndarray]:
         #
         # Verify that the input vector matches the dimensions of the network
         #
-        assert input.shape == (self.input_dim,), "Unexpected input dimension"
+        assert len(input.shape) == 2, "CFVN expects a 2d input (batch size, input vector dim)"
+        assert input.shape[1] == self.input_dim, "Unexpected input dimension"
         #
         # Run inference
         #
-        tf_strategy, tf_values =  self.network(np.expand_dims(input, axis=0))
+        tf_strategy, tf_values =  self.network(input)
         #
-        # Format the tensorflow output back into triu numpy arrays
+        # Post-processing
         #
-        np_strategy = np.zeros((len(valid_action_idxs), 52, 52))
-        triu_idxs = np.triu_indices(52, k=1)
-        # Ensure tensor output is converted to NumPy and squeezed to remove batch dimension
-        tf_strategy = tf_strategy.numpy().squeeze(axis=0)  # Shape: (num_actions, 1326)
-        # Map each action's strategy into the upper triangular array
-        for idx, padded_idx in enumerate(valid_action_idxs):
-            np_strategy[idx][triu_idxs] = tf_strategy[padded_idx]  # Fill upper-triangle entries
-        # Repeat for the values array
-        np_values = np.zeros((self.num_players, 52, 52))
-        tf_values = tf_values.numpy().squeeze(axis=0) # Shape: (num_players, 1326)
-        for player in range(self.num_players):
-            np_values[player][triu_idxs] = tf_values[player]
-        #
-        # Set strategy and values for invalid hands to zero.
-        # A hand is considered invalid if it contains a public card.
-        #
-        public_card_idxs = np.where(input[:52] == 1)[0]
-        np_values[:, public_card_idxs, :] = 0.
-        np_values[:, :, public_card_idxs] = 0.
-        np_strategy[:, public_card_idxs, :] = 0.
-        np_strategy[:, :, public_card_idxs] = 0.
-        #
-        # Renormalize the strategy matrix
-        #
-        strat_sums = np.sum(np_strategy, axis=0, keepdims=True)
-        strat_sums[strat_sums == 0] = 1 # Don't divide by zero
-        np_strategy /= strat_sums
-        #
-        # Return the numpy triu matrices as a tuple
-        #
-        return np_strategy, np_values
+        # Convert back to numpy
+        strategy = tf_strategy.numpy()
+        values = tf_values.numpy()
+        # Normalize strategy
+        sums = strategy.sum(axis=0, keepdims=0)
+        strategy /= sums
+        # Zero hands with invalid cards
+        public_card_idxs = np.where(input[0, :52] == 1)[0]
+        for card in public_card_idxs:
+            strategy[:, :, get_card_coors(card)] = 0
+            values[:, :, get_card_coors(card)] = 0
+        return strategy, values
+
+
 
     #
     # Add a query to the query queue for solving

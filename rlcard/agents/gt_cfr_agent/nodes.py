@@ -22,6 +22,7 @@ import copy
 from itertools import permutations, combinations
 import numpy as np
 import tensorflow as tf
+import time
 #import cupy as np
 #from sparse import COO
 import treys
@@ -29,7 +30,7 @@ import treys
 # Internal imports
 from rlcard.games.base import Card
 from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork
-from rlcard.agents.gt_cfr_agent.utils import random_strategy, get_1d_coor
+from rlcard.agents.gt_cfr_agent.utils import random_strategy, get_1d_coor, get_card_coors, starting_hand_values
 from rlcard.games.limitholdem import PlayerStatus
 from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
 from rlcard.games.nolimitholdem.round import Action
@@ -80,7 +81,7 @@ class CFRTree:
         #
         #      Nodes 1, 2, 3 are terminal nodes and descendants of Node 0.
         #
-        self.tree = np.array([], dtype=np.int32)
+        self.tree = np.array([], dtype=np.int8)
         #
         # Node types
         #
@@ -166,6 +167,15 @@ class CFRTree:
         #
         self.strategies = np.array([[]], dtype=np.float32)
         #
+        # Regrets
+        #
+        #    - Matrix size = (Approx. # of decision nodes * # of actions, # of hands)
+        # 
+        #    - regrets[strat_idxs[i], j, k]
+        #          = regret of player at node i selecting action j with hand k 
+        #
+        self.regrets = np.array([[]], dtype=np.float32)
+        #
         # Board string to payoff idx
         #
         #   - Dictionary that maps board strings to idxs in the payoff matrix 
@@ -198,12 +208,98 @@ class CFRTree:
         #       = payoff to player i at node x when holding hand j against hand k
         #
         self.payoffs = np.array([], dtype=np.float32)
+
+    #
+    # Initialize the gadget game
+    #
+    # A key idea of re-solving for imperfect information games
+    #
+    # For any player making a decision at a game state, 
+    # they must consider that their opponent can choose to steer the game 
+    # toward that game state or not.
+    #
+    # The example used in the literature is rock-paper-scissors.
+    #
+    #     - Player 1 selects an action (r-p-s) that's hidden from Player 2
+    #
+    #     - At Player 2's decision node, they must reason about how frequently
+    #       Player 1 chooses to play toward each state.
+    #
+    #       i.e. the frequency at which Player 1 chooses each action
+    #
+    #     - This reasoning about their opponent's strategy in an ancestor node,
+    #       then informs their strategy in the current node.
+    #
+    #       e.x. If Player 2 knows that Player 1 always chooses to play toward the paper node, then
+    #            their optimal strategy at that node would be to always play Scissors.
+    #
+    #
+    # This reasoning is modeled here by the "regret gadget" 
+    # 
+    # The oppponent has two (fictitious) actions:
+    #
+    #     - "Follow"    (F) - choose to play toward the root state
+    #
+    #     - "Terminate" (T) - reject the root state, select actions to play away from the root state
+    # 
+    # The values for the two actions:
+    #
+    #     - value for following   (f_values) - the opponent's values at the 
+    #                                          root state of the cfr tree.
+    #                                          = self.root.player_values[opponent player id]
+    #
+    #     - value for terminating (t_values) - this an input for re-solving
+    #                                          and is either heuristically derived
+    #                                          or taken from the solution of a previous CFR run
+    #                                          = self.terminate_values
+    #
+    # Using these values, the opponent can compute an associated "gadget regret" and
+    # "gadget strategy" for the follow-or-terminate gadget decision.
+    #
+    # This strategy can then be taken as the opponent's range in the root node
+    # of the CFR for the next CFR value update iteration.
+    # 
+    # To initialize the gadget game, we need the opponent's values for 
+    # choosing the Terminate gadget action.
+    #
+    #     Case 1: This is the start of the game. We need to use a heuristic
+    #     to estimate the opponent player's values. This can be done by precomputing 
+    #     the winning percentage of each hand if the game checked to showdown.
+    #
+    #     Case 2: This is not the start of the game. Use the opponent players' values
+    #     from the previous CFR run.
+    #
+    # Note: The naming conventions here are a tad confusing. 'terminate_values' is
+    #       the payoff matrix the opponent player recieves in the gadget game
+    #       when she selects the Terminate action.
+    #
+    #       This is not to be confused with the 'gadget_values' which is the opponent's
+    #       expected value in the gadget game according to their current gadget strategy
+    #       and the current cfr values at the root node.
+    #
+    #       So, the word 'values' here is used twice to mean two different things.
+    #
+    #       This arises because the gadget game is a meta-game. In the gadget game,
+    #       the opponent is seeking to maximize her expected value from payoffs, but 
+    #       those payoffs are themselves values for the real game.
+    #
+    # NOTE - How does the gadget game change in the >2 player game setting. 
+    #
+    def init_gadget_game(self, input_opponents_values: np.ndarray =None):
+        root_game = self.game_states[0]
+        if input_opponents_values is not None:
+            self.terminate_values = input_opponents_values
+        else:
+            self.terminate_values = starting_hand_values(root_game) * root_game.dealer.pot # = t_values = v_2 in the literature
+        self.gadget_regrets = np.zeros((2, 1326)) # 2 gadget actions, (Follow, Terminate)
+        self.gadget_values = np.zeros((1326,))
     
     #
     # Creates the root node
     #
     def add_root_node(self, game_state: NolimitholdemGame, 
-                            player_ranges: np.ndarray) -> None:
+                            player_ranges: np.ndarray,
+                            opponent_values: np.ndarray =None) -> None:
         #
         # Sanity checks
         #
@@ -212,19 +308,20 @@ class CFRTree:
         #
         # Set all the actions
         #
-        self.all_actions = game_state.get_all_actions()
+        self.all_actions = [action.value for action in game_state.get_all_actions()]
         #
         # Set internal matrices
         #
-        self.tree = np.array([[-1]], dtype=np.int32) # nodes are never descendants of themselves
+        self.tree = np.array([[-1]], dtype=np.int8) # nodes are never descendants of themselves
         self.node_types = np.array([0], dtype=np.int8) # all root nodes are decision nodes
         self.game_states.append(game_state)
         self.active_nodes = np.array([False], dtype=np.bool_)
         self.range_map = np.array([np.arange(self.n_players)], dtype=np.int8)
         self.ranges = player_ranges
         self.values = np.zeros((1, self.n_players, 1326))
-        legal_actions = [self.all_actions.index(action) for action in game_state.get_legal_actions()]
+        legal_actions = [self.all_actions.index(action.value) for action in game_state.get_legal_actions()]
         self.strategies = random_strategy(len(legal_actions), game_state.public_cards)
+        self.regrets = np.zeros((len(legal_actions), 1326))
         root_strat_idxs = [-1] * len(self.all_actions)
         for idx, action in enumerate(legal_actions):
             root_strat_idxs[action] = idx
@@ -234,6 +331,10 @@ class CFRTree:
         # Increment node count
         #
         self.n_nodes += 1
+        #
+        # Initialize gadget game
+        #
+        self.init_gadget_game(opponent_values)
 
     #
     # Adds a decision node to the game tree
@@ -266,9 +367,9 @@ class CFRTree:
         #
         # Add child to the tree matrix
         #
-        new_column = np.ones((self.n_nodes, 1)) * -1
+        new_column = np.ones((self.n_nodes, 1), dtype=np.int8) * -1
         self.tree = np.hstack([self.tree, new_column])
-        new_row = np.ones(self.n_nodes+1) * -1
+        new_row = np.ones(self.n_nodes+1, dtype=np.int8) * -1
         self.tree = np.vstack([self.tree, new_row])
         self.tree[parent_id, self.n_nodes] = action_id
         #
@@ -290,7 +391,7 @@ class CFRTree:
         #
         child_id = self.n_nodes
         player_id = child_game.game_pointer
-        action_idx = self.all_actions.index(action)
+        action_idx = self.all_actions.index(action_id)
         child_range_idxs = self.range_map[parent_id]
         self.range_map = np.vstack([self.range_map, child_range_idxs])
         parent_range_idx = self.range_map[parent_id, player_id]
@@ -308,10 +409,11 @@ class CFRTree:
         #
         self.strat_idxs = np.vstack([self.strat_idxs, [-1]*len(self.all_actions)])
         if child_type == 0: # Decision node
-            legal_actions = [self.all_actions.index(action) for action in child_game.get_legal_actions()]
+            legal_actions = [self.all_actions.index(action.value) for action in child_game.get_legal_actions()]
             child_strategy = random_strategy(len(legal_actions), child_game.public_cards)
             base = self.strategies.shape[0]
             self.strategies = np.concatenate([self.strategies, child_strategy], axis=0)
+            self.regrets = np.concatenate([self.regrets, np.zeros((len(legal_actions), 1326))], axis=0)
             for offset, action in enumerate(legal_actions):
                 self.strat_idxs[child_id, action] = base + offset
         #
@@ -373,56 +475,267 @@ class CFRTree:
                 self.activate(child_id)
 
     #
-    # One iteration of CFR
+    # Update the regrets in the gadget game
     #
-    # Assumption - child nodes are always below their parents in the tree matrix
-    #              i.e. child row id > parent row id
+    # NOTE - implement this function for >2 player games, shouldn't be too hard
     #
-    def update_values(self):
+    def update_gadget_regrets(self):
+        
+        """
+        # DEBUG
+        print('---')
+        opp_pid = (self.root.game.game_pointer + 1) % 2
+        card1, card2 = sorted(card.to_int() for card in self.root.game.players[opp_pid].hand)
+        #print([str(card) for card in self.root.game.players[opp_pid].hand])
+        """
+        
+        # Game state for the root
+        root_game = self.game_states[0]
+
         #
-        # Downward pass - propagate range probabilities
+        # Compute the gadget strategy using the gadget regrets
         #
+        # Note 1: Because there are only two actions for this decision (T, F),
+        #         we only need to compute the prob. of selecting one action.
+        #         
+        #         Here we choose to compute the follow prob. because it is
+        #         used by the cfr root node.
+        #
+        # Note 2: Let, self.gadget_regret[0] be the Follow    action regrets
+        #         and, self.gadget_regret[1] be the Terminate action regrets
+        #
+        gadget_regrets_positives = np.maximum(self.gadget_regrets, 0) # Should already be non-negative
+
+        """
+        # DEBUG
+        print()
+        print(f'Regrets - Follow: {gadget_regrets_positives[0, card1, card2]}  Terminate: {gadget_regrets_positives[1, card1, card2]}')
+        print(f'Value  -  {self.gadget_values[card1, card2]}')
+        """
+
+        denom = gadget_regrets_positives[0] + gadget_regrets_positives[1]
+        safe_denom = np.where(denom == 0, 1, denom) # remove zeros from denom to avoid dividing by zero
+        gadget_follow_strat = np.where(denom == 0, 0.5, gadget_regrets_positives[0] / safe_denom)
+
+        """
+        # DEBUG
+        print(f'Follow strat - {gadget_follow_strat[card1, card2]}')
+        """
+
+        #
+        # In the above line, we assign 50-50 probability to hands with zero in the denominator.
+        # This works for valid hands, but has the side effect of giving invalid hands non-zero
+        # reach probabilities.
+        #
+        # Mask out invalid hands
+        #
+        for card in root_game.public_cards:
+            gadget_follow_strat[get_card_coors(card.to_int())] = 0
+
+        #
+        # Set the opponent's range in the cfr root node to the gadget's follow strategy 
+        #
+        # Reasoning:
+        #     Gadget follow strat = probability of choosing to play toward the cfr root state
+        #     Opp. root range = prob. of the opp. reaching this state given her strategy
+        #     Therefore, gadget follow strat = opponent's range at the root node.
+        #
+        # Normalize the opponent's reach probibility.
+        #
+        # Note 1 - while this step is not included in deepstack's pseudocode,
+        #          I think it fits the reasoning of the gadget game - the initial
+        #          state of the sub game can be thought of as the start of a game
+        #          where the two player's are dealt cards from a weighted deck.
+        #          Using this reasoning, the follow strat should be normalized.
+        #
+        # Note 2 - I came to this conclusion after noticing the expected values
+        #          blow up because we are giving a 1.0 reach probability for the
+        #          opponent for good hands and 0.0 reach probability for bad hands.
+        #          When this is propagated down to terminal nodes, it leads to
+        #          expected values greater than the total number of chips in the game.
+        #
+        # Note 3 - I don't think multiplying all reach probabilities by a constant
+        #          will affect the output strategy.
+        #
+        # Note 4 - Bayes' perspective:
+        #          Un-normalized = prob opp. player reaches the root state given they have the hand (i, j)
+        #          Normalized    = prob opp. player reaches the root state and has the hand (i, j)
+        #
+        opp_pid = (root_game.game_pointer + 1) % 2
+        if np.sum(gadget_follow_strat) != 0:
+            self.ranges[self.range_map[0, opp_pid], :] = gadget_follow_strat / np.sum(gadget_follow_strat)
+        else:
+            self.ranges[self.range_map[0, opp_pid], :] = gadget_follow_strat # ALL ZEROS
+
+        #
+        # Compute the updated gadget values
+        #
+        # This is a standard expected value computation.
+        #
+        new_gadget_values = (gadget_follow_strat * self.values[0, opp_pid, :] + 
+                             (1 - gadget_follow_strat) * self.terminate_values)
+
+        """
+        # DEBUG
+        print()
+        print(f'New value - follow strat * root value + (1 - follow strat) * terminate value = {gadget_follow_strat[card1, card2]} * {self.root.values[opp_pid, card1, card2]} + {1 - gadget_follow_strat[card1, card2]} * {self.terminate_values[card1, card2]} = {new_gadget_values[card1, card2]}')
+
+        # DEBUG
+        print()
+        print(f'Follow regret update = max(regret + node value - new gadget value, 0) = max({self.gadget_regrets[0, card1, card2]} + {self.root.values[opp_pid, card1, card2]} - {new_gadget_values[card1, card2]}, 0) = {np.maximum(self.gadget_regrets[0]  + self.root.values[opp_pid] - new_gadget_values, 0)[card1, card2]}')
+        print(f'Terminate regret update = max(regret + terminate value - gadget value, 0) = max({self.gadget_regrets[1, card1, card2]} + {self.terminate_values[card1, card2]} - {self.gadget_values[card1, card2]}, 0) = {np.maximum(self.gadget_regrets[1] + self.terminate_values     - self.gadget_values, 0)[card1, card2]}')
+        """
+
+        #
+        # Update the gadget regrets
+        #
+        # Subtle point:
+        #     - If the opponent chooses to Follow    then they recieve the gadget value at iteration t
+        #     - If the opponent chooses to Terminate then they recieve the gadget value at iteration t - 1
+        #
+        # Why?
+        #     - I think because, conceptually, if the opponent is choosing to terminate at time t, then
+        #       they don't get to observe the payoffs that would've happened to the CFR tree at time t
+        #
+        # Note:
+        #    - Always selecting Follow    yields a fixed payoff equal to the opp. cfr values at the root node
+        #    - Always selecting Terminate yields a fixed payoff equal to the terminate values
+        #
+        self.gadget_regrets[0] = np.maximum(self.gadget_regrets[0] + self.values[0, opp_pid, :] - new_gadget_values, 0) # gadget value @ t
+        self.gadget_regrets[1] = np.maximum(self.gadget_regrets[1] + self.terminate_values - self.gadget_values, 0)    # gadget value @ t + 1
+
+        #
+        # Update the gadget values to the new values
+        #
+        self.gadget_values = new_gadget_values
+        
+        """
+        # DEBUG
+        import ipdb; ipdb.set_trace()
+        """
+    
+    def update_ranges(self):
         for parent in range(self.n_nodes):
             player = self.game_states[parent].game_pointer # NOTE - This could be replaced by a "owner" vector
             for child in np.where(self.tree[parent, :] >= 0)[0]:
                 action = self.all_actions.index(self.tree[parent, child]) # NOTE - This is bad
                 self.ranges[self.range_map[child, player], :] = self.ranges[self.range_map[parent, player], :] * self.strategies[self.strat_idxs[parent, action], :]
+    
+    def update_values_w_cfvn(self):
+        inactive_nodes = np.where((self.node_types == 0) & (~self.active_nodes))[0] # non-active decision nodes
+        batch_vects = np.zeros((inactive_nodes.shape[0], 2709)) # (num. of inactive nodes, cfvn input vector size)
+        batch_actions = []
+        # TODO - vectorize this loop
+        for batch_idx, node in enumerate(inactive_nodes):
+            batch_vects[batch_idx, :] = self.cfvn.to_vect(
+                        self.game_states[node], 
+                        self.ranges[self.range_map[node, :], :]
+            )
+            # NOTE - I hate this
+            # TODO - Rework how we handle actions
+            batch_actions.append([self.all_actions.index(a.value)
+                                  for a in self.game_states[node].get_legal_actions()])
+
+        strats, vals = self.cfvn.query(batch_vects)
+        # TODO - vectorize this loop
+        for batch_idx, node in enumerate(inactive_nodes):
+            self.strategies[self.strat_idxs[node, batch_actions[batch_idx]], :] = strats[batch_idx, batch_actions[batch_idx], :]
+        self.values[inactive_nodes, :, :] = vals
+    
+    def update_values(self):
+        for node in range(self.n_nodes-1, -1, -1):
+            # Active decision node
+            if self.node_types[node] == 0 and self.active_nodes[node]: 
+                player = self.game_states[node].game_pointer # NOTE - Could be replaced
+                action_idxs = self.tree[node, np.where(self.tree[node] != -1)][0] # NOTE - This is bad
+                actions = np.array([self.all_actions.index(a) for a in action_idxs])
+                # Update player
+                strat = self.strategies[self.strat_idxs[player, actions], :] # shape = (num. of actions, 1326)
+                children = np.where(self.tree[node] != -1)
+                child_values = self.values[children, player, :][0] # shape = (num. of actions, 1326)
+                self.values[node, player, :] = np.sum(strat * child_values, axis=0)
+                # Update opponent
+                opponent = (player + 1) % 2
+                self.values[node, opponent, :] = np.sum(self.values[children, opponent, :], axis=1)
+                # Update regrets
+                self.regrets[self.strat_idxs[player, actions], :] = np.maximum(
+                    self.regrets[self.strat_idxs[player, actions], :] + child_values - self.values[node, opponent, :],
+                    0
+                )
+                # Update strategy
+                regret_sum = np.sum(self.regrets[self.strat_idxs[player, actions], :], axis=0, keepdims=True)
+                denom = np.where(regret_sum == 0, 1, regret_sum)
+                self.strategies[self.strat_idxs[player, actions], :] = np.where(
+                    regret_sum == 0,
+                    1/actions.shape[0],
+                    self.regrets[self.strat_idxs[player, actions], :]/denom
+                ) # NOTE - This might be wrong?
+                # TODO - Add cummulative strategy update here
+            # Terminal node
+            elif self.node_types[node] == 1:
+                num_active = sum([p.status != PlayerStatus.FOLDED 
+                                  for p in self.game_states[node].players]) # NOTE - This is bad
+                # Non-showdown
+                if num_active != 1:
+                    payout = np.array(self.game_states[node].get_payoffs()) # NOTE - This is bad
+                    self.values[node, :, :] = payout[:, None] * np.sum(self.ranges[self.range_map[node, :], :], axis=1)[:, None]
+                # Showdown
+                else:
+                    #
+                    # self.payoffs[node, 0, :, :]
+                    #    = (1326, 1326) matrix
+                    #
+                    # self.ranges[node, 1, :][np.newaxis, :]
+                    #    = (1, 1326) matrix
+                    #
+                    # We multiply each row of the payoff matrix by the range vector,
+                    # then sum each row to get (1326,) result
+                    #
+                    pot = self.game_states[node].dealer.pot
+                    self.values[node, 0, :] = 0.5 * pot * np.sum(
+                        self.payoffs[self.payoffs_idxs[node], 0, :, :] *
+                        self.ranges[self.range_map[node, 1], :][np.newaxis, :],
+                        axis=1
+                    )
+                    self.values[node, 1, :] = 0.5 * pot * np.sum(
+                        self.payoffs[self.payoffs_idxs[node], 1, :, :] *
+                        self.ranges[self.range_map[node, 0], :][np.newaxis, :],
+                        axis=1
+                    )
+
+    #
+    # One iteration of CFR
+    #
+    # Assumption - child nodes are always below their parents in the tree matrix
+    #              i.e. child row id > parent row id
+    #
+    # TODO - Implement returning querries
+    #
+    def cfr_update(self) -> list[np.ndarray]:
+        #
+        # Downward pass - propagate range probabilities
+        #
+        strt = time.time()
+        self.update_ranges()
+        print(f'update_ranges {time.time() - strt} s')
+        #
+        # Update non-active decision node values with the cfvn
+        #
+        strt = time.time()
+        self.update_values_w_cfvn()
+        print(f'update_values_w_cfvn {time.time() - strt} s')
         #
         # Upward pass - bubble up expected values
         #
-        for node in range(self.n_nodes-1, -1, -1):
-            # Decision node
-            if self.node_types[node] == 0: 
-                player = self.game_states[node].game_pointer # NOTE - Could be replaced
-                action_idxs = self.tree[np.where(self.tree[node] != -1)] # NOTE - This is bad
-                actions = np.array([self.all_actions.index(a) for a in action_idxs])
-                # Active
-                if self.active_nodes[node]:
-                    # Update player
-                    strat = self.strategies[self.strat_idxs[player, actions], :] # shape = (num. of actions, 1326)
-                    children = np.where(self.tree[node] != -1)
-                    child_values = self.values[children, player, :] # shape = (num. of actions, 1326)
-                    self.values[node, player, :] = np.sum(strat * child_values, axis=0)
-                    # Update opponent
-                    opponent = (player + 1) % 2
-                    self.values[node, opponent, :] = np.sum(self.values[children, opponent, :], axis=0)
-                    # Update strategy
-                    ... #TODO
-                # Non-active (NOTE - should do something with this section later)
-                else:
-                    vect = self.cfvn.to_vect(self.game_states[node], 
-                                             self.ranges[self.range_map[node, :], :])
-                    strat, vals = self.cfvn.query(vect, actions)
-                    self.strategies[self.strat_idxs[node, actions], :] = strat
-                    self.values[node, opponent, :] = vals
-            # Terminal node
-            elif self.node_types[node] == 1:
-                # Non-showdown
-                if ...: # TODO
-                    ... # TODO
-                # Showdown
-                else:
-                    ... # TODO
+        strt = time.time()
+        self.update_values()
+        print(f'update_values {time.time() - strt} s')
+        # Update gadget game regrets
+        strt = time.time()
+        self.update_gadget_regrets()
+        print(f'update_gadget_regrets {time.time() - strt} s')
+        # Return a list of querries that were made to the cfvn
+        return [] # NOTE - Not implemented
             
                     
 
@@ -716,7 +1029,6 @@ class CFRNode(ABC):
         except:
             import traceback
             print(traceback.format_exc())
-            #import ipdb; ipdb.set_trace()
             assert(False)
     #
     # Activate the entire game tree
@@ -1123,7 +1435,9 @@ class TerminalNode(CFRNode):
             payoffs = TerminalNode.payoffs_cache[key]
             #
             # self.player_ranges[opp_pid] -> (52, 52), prob of the opponent holding cards (k, k)
+            #
             # self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :] -> (1, 1, 52, 52), adds two ficticous dimensions
+            # 
             # payoffs[pid] -> (52, 52, 52, 52), payoff for pid holding cards (i, j) and opponent holding (k, l)
             #
             # payoffs[pid] * self.player_ranges[opp_pid][np.newaxis, np.newaxis, :, :] = payoffs[pid][i, j, k, l] * self.player_ranges[opp_pid][k, l] -> (52, 52, 52, 52)
