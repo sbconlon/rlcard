@@ -23,8 +23,7 @@ from itertools import permutations, combinations
 import numpy as np
 import tensorflow as tf
 import time
-#import cupy as np
-#from sparse import COO
+import cupy as cp
 import treys
 
 # Internal imports
@@ -81,7 +80,7 @@ class CFRTree:
         #
         #      Nodes 1, 2, 3 are terminal nodes and descendants of Node 0.
         #
-        self.tree = np.array([], dtype=np.int8)
+        self.tree = cp.array([], dtype=np.int8)
         #
         # Node types
         #
@@ -99,7 +98,7 @@ class CFRTree:
         #
         #     Nodes 1, 2, 3 are terminal nodes and descendants of Node 0.
         #
-        self.node_types = np.array([], dtype=np.int8)
+        self.node_types = cp.array([], dtype=np.int8)
         #
         # Game states
         #
@@ -110,13 +109,22 @@ class CFRTree:
         self.game_states: list[NolimitholdemGame]
         self.game_states = []
         #
+        # Players
+        #
+        #    - Vector of length = # of nodes
+        #
+        #    - players[i] = player id of the acting player if node i is a decision node
+        #                   -1 if node i is a terminal node
+        #
+        self.players = cp.array([], dtype=np.int8)
+        #
         # Activate nodes
         #
         #    - Vector of length = # of nodes
         #
         #    - active_nodes[i] = boolean whether node i is active
         #
-        self.active_nodes = np.array([], dtype=np.bool_)
+        self.active_nodes = cp.array([], dtype=np.bool_)
         #
         # Range map
         #
@@ -125,7 +133,7 @@ class CFRTree:
         #   - range_map[i, j] = idx for the range vector associated with 
         #                       player j at node i.
         #
-        self.range_map = np.array([], dtype=np.int8)
+        self.range_map = cp.array([], dtype=np.int8)
         #
         # Ranges
         #
@@ -135,7 +143,7 @@ class CFRTree:
         #
         #   - ranges[range_map[i, j], k] = prob. of player j reaching node i with hand k
         #
-        self.ranges = np.array([], dtype=np.float32)
+        self.ranges = cp.array([], dtype=np.float32)
         #
         # Values
         #
@@ -143,7 +151,7 @@ class CFRTree:
         #
         #   - values[i, j, k] = expected value of player j having hand k in node i
         #
-        self.values = np.array([], dtype=np.float32)
+        self.values = cp.array([], dtype=np.float32)
         #
         # Strategy indexes
         #
@@ -156,7 +164,7 @@ class CFRTree:
         #
         #        Otherwise, -1.
         #
-        self.strat_idxs = np.array([[]], dtype=np.int8)
+        self.strat_idxs = cp.array([[]], dtype=np.int8)
         #
         # Strategies
         #
@@ -165,7 +173,7 @@ class CFRTree:
         #    - strategies[strat_idxs[i], j, k] 
         #         = prob. of player at node i selecting action j with hand k
         #
-        self.strategies = np.array([[]], dtype=np.float32)
+        self.strategies = cp.array([[]], dtype=np.float32)
         #
         # Regrets
         #
@@ -174,7 +182,7 @@ class CFRTree:
         #    - regrets[strat_idxs[i], j, k]
         #          = regret of player at node i selecting action j with hand k 
         #
-        self.regrets = np.array([[]], dtype=np.float32)
+        self.regrets = cp.array([[]], dtype=np.float32)
         #
         # Board string to payoff idx
         #
@@ -198,7 +206,7 @@ class CFRTree:
         #
         #       -1 otherwise.
         #
-        self.payoffs_idxs = np.array([], dtype=np.int8)
+        self.payoffs_idxs = cp.array([], dtype=np.int8)
         #
         # Payoffs
         #
@@ -207,7 +215,7 @@ class CFRTree:
         #   - payoffs[payoffs_idxs[x], i, j, k]
         #       = payoff to player i at node x when holding hand j against hand k
         #
-        self.payoffs = np.array([], dtype=np.float32)
+        self.payoffs = cp.array([], dtype=np.float32)
 
     #
     # Initialize the gadget game
@@ -288,11 +296,11 @@ class CFRTree:
     def init_gadget_game(self, input_opponents_values: np.ndarray =None):
         root_game = self.game_states[0]
         if input_opponents_values is not None:
-            self.terminate_values = input_opponents_values
+            self.terminate_values = cp.array(input_opponents_values)
         else:
-            self.terminate_values = starting_hand_values(root_game) * root_game.dealer.pot # = t_values = v_2 in the literature
-        self.gadget_regrets = np.zeros((2, 1326)) # 2 gadget actions, (Follow, Terminate)
-        self.gadget_values = np.zeros((1326,))
+            self.terminate_values = cp.array(starting_hand_values(root_game)) * root_game.dealer.pot # = t_values = v_2 in the literature
+        self.gadget_regrets = cp.zeros((2, 1326)) # 2 gadget actions, (Follow, Terminate)
+        self.gadget_values = cp.zeros((1326,))
     
     #
     # Creates the root node
@@ -312,21 +320,22 @@ class CFRTree:
         #
         # Set internal matrices
         #
-        self.tree = np.array([[-1]], dtype=np.int8) # nodes are never descendants of themselves
-        self.node_types = np.array([0], dtype=np.int8) # all root nodes are decision nodes
+        self.tree = cp.array([[-1]], dtype=cp.int8) # nodes are never descendants of themselves
+        self.node_types = cp.array([0], dtype=cp.int8) # all root nodes are decision nodes
+        self.players = cp.array([game_state.game_pointer], dtype=cp.int8)
         self.game_states.append(game_state)
-        self.active_nodes = np.array([False], dtype=np.bool_)
-        self.range_map = np.array([np.arange(self.n_players)], dtype=np.int8)
-        self.ranges = player_ranges
-        self.values = np.zeros((1, self.n_players, 1326))
+        self.active_nodes = cp.array([False], dtype=cp.bool_)
+        self.range_map = cp.array([cp.arange(self.n_players)], dtype=cp.int8)
+        self.ranges = cp.array(player_ranges)
+        self.values = cp.zeros((1, self.n_players, 1326))
         legal_actions = [self.all_actions.index(action.value) for action in game_state.get_legal_actions()]
-        self.strategies = random_strategy(len(legal_actions), game_state.public_cards)
-        self.regrets = np.zeros((len(legal_actions), 1326))
+        self.strategies = cp.array(random_strategy(len(legal_actions), game_state.public_cards))
+        self.regrets = cp.zeros((len(legal_actions), 1326))
         root_strat_idxs = [-1] * len(self.all_actions)
         for idx, action in enumerate(legal_actions):
             root_strat_idxs[action] = idx
-        self.strat_idxs = np.array([root_strat_idxs], dtype=np.int8)
-        self.payoffs_idxs = np.array([-1], dtype=np.int8)
+        self.strat_idxs = cp.array([root_strat_idxs], dtype=np.int8)
+        self.payoffs_idxs = cp.array([-1], dtype=np.int8)
         #
         # Increment node count
         #
@@ -367,15 +376,19 @@ class CFRTree:
         #
         # Add child to the tree matrix
         #
-        new_column = np.ones((self.n_nodes, 1), dtype=np.int8) * -1
-        self.tree = np.hstack([self.tree, new_column])
-        new_row = np.ones(self.n_nodes+1, dtype=np.int8) * -1
-        self.tree = np.vstack([self.tree, new_row])
-        self.tree[parent_id, self.n_nodes] = action_id
+        new_column = cp.ones((self.n_nodes, 1), dtype=cp.int8) * -1
+        self.tree = cp.hstack([self.tree, new_column])
+        new_row = cp.ones(self.n_nodes+1, dtype=np.int8) * -1
+        self.tree = cp.vstack([self.tree, new_row])
+        self.tree[parent_id, self.n_nodes] = self.all_actions.index(action_id)
         #
-        # Add child to node types
+        # Add child to node types and players
         #
-        self.node_types = np.append(self.node_types, child_type)
+        self.node_types = cp.append(self.node_types, child_type)
+        if child_type == 0:
+            self.players = cp.append(self.players, child_game.game_pointer)
+        else:
+            self.players = cp.append(self.players, -1)
         #
         # Add child to game states
         #
@@ -385,35 +398,35 @@ class CFRTree:
         #
         # Note - terminal nodes are always considered active
         #
-        self.active_nodes = np.append(self.active_nodes, child_type == 1)
+        self.active_nodes = cp.append(self.active_nodes, child_type == 1)
         #
         # Add child range
         #
         child_id = self.n_nodes
-        player_id = child_game.game_pointer
+        player_id = self.players[child_id]
         action_idx = self.all_actions.index(action_id)
         child_range_idxs = self.range_map[parent_id]
-        self.range_map = np.vstack([self.range_map, child_range_idxs])
+        self.range_map = cp.vstack([self.range_map, child_range_idxs])
         parent_range_idx = self.range_map[parent_id, player_id]
         parent_strat_idx = self.strat_idxs[parent_id, action_idx]
         child_range = self.strategies[parent_strat_idx] * self.ranges[parent_range_idx]
-        self.ranges = np.vstack([self.ranges, child_range])
+        self.ranges = cp.vstack([self.ranges, child_range])
         self.range_map[child_id, player_id] = self.ranges.shape[0] - 1
         #
         # Add child values
         #
-        child_values = np.zeros((1, self.n_players, 1326))
-        self.values = np.concatenate([self.values, child_values], axis=0)
+        child_values = cp.zeros((1, self.n_players, 1326))
+        self.values = cp.concatenate([self.values, child_values], axis=0)
         #
         # Add strategy
         #
-        self.strat_idxs = np.vstack([self.strat_idxs, [-1]*len(self.all_actions)])
+        self.strat_idxs = cp.vstack([self.strat_idxs, [-1]*len(self.all_actions)])
         if child_type == 0: # Decision node
             legal_actions = [self.all_actions.index(action.value) for action in child_game.get_legal_actions()]
-            child_strategy = random_strategy(len(legal_actions), child_game.public_cards)
+            child_strategy = cp.array(random_strategy(len(legal_actions), child_game.public_cards))
             base = self.strategies.shape[0]
-            self.strategies = np.concatenate([self.strategies, child_strategy], axis=0)
-            self.regrets = np.concatenate([self.regrets, np.zeros((len(legal_actions), 1326))], axis=0)
+            self.strategies = cp.concatenate([self.strategies, child_strategy], axis=0)
+            self.regrets = cp.concatenate([self.regrets, cp.zeros((len(legal_actions), 1326))], axis=0)
             for offset, action in enumerate(legal_actions):
                 self.strat_idxs[child_id, action] = base + offset
         #
@@ -424,20 +437,20 @@ class CFRTree:
             if num_active > 1: # Showdown
                 board_str = five_cards_to_str(child_game.public_cards)
                 if board_str in self.board_to_idx: # Cache hit
-                    self.payoffs_idxs = np.append(self.payoffs_idxs, self.board_to_idx[board_str])
+                    self.payoffs_idxs = cp.append(self.payoffs_idxs, self.board_to_idx[board_str])
                 else: # Cache miss
                     payoff_matrix = compute_payoff_matrix(child_game)
-                    payoff_matrix = np.expand_dims(payoff_matrix, axis=0)
+                    payoff_matrix = cp.expand_dims(payoff_matrix, axis=0)
                     if self.payoffs:
-                        self.payoffs = np.concatenate([self.payoffs, payoff_matrix], axis=0)
+                        self.payoffs = cp.concatenate([self.payoffs, payoff_matrix], axis=0)
                     else:
                         self.payoffs = payoff_matrix
-                    self.payoffs_idxs = np.append(self.payoffs_idxs, self.payoffs.shape[0]-1)
+                    self.payoffs_idxs = cp.append(self.payoffs_idxs, self.payoffs.shape[0]-1)
                     self.board_to_idx[board_str] = self.payoffs_idxs[child_id]
             else: # No showdown
-                self.payoffs_idxs = np.append(self.payoffs_idxs, -1)
+                self.payoffs_idxs = cp.append(self.payoffs_idxs, -1)
         else: # None terminal node
-            self.payoffs_idxs = np.append(self.payoffs_idxs, -1)
+            self.payoffs_idxs = cp.append(self.payoffs_idxs, -1)
         #
         # Update node count
         #
@@ -470,9 +483,9 @@ class CFRTree:
         assert self.node_types[node_id] == 0, "Only decision nodes can be activated"
         assert self.active_nodes[node_id], "Node is not already active"
         # Activate the children
-        for child_id in np.where(self.tree[node_id, :] >= 0)[0]:
+        for child_id in cp.where(self.tree[node_id, :] >= 0)[0]:
             if self.node_types[child_id] == 0 and not self.active_nodes[child_id]:
-                self.activate(child_id)
+                self.activate(int(child_id))
 
     #
     # Update the regrets in the gadget game
@@ -504,7 +517,7 @@ class CFRTree:
         # Note 2: Let, self.gadget_regret[0] be the Follow    action regrets
         #         and, self.gadget_regret[1] be the Terminate action regrets
         #
-        gadget_regrets_positives = np.maximum(self.gadget_regrets, 0) # Should already be non-negative
+        gadget_regrets_positives = cp.maximum(self.gadget_regrets, 0) # Should already be non-negative
 
         """
         # DEBUG
@@ -514,8 +527,8 @@ class CFRTree:
         """
 
         denom = gadget_regrets_positives[0] + gadget_regrets_positives[1]
-        safe_denom = np.where(denom == 0, 1, denom) # remove zeros from denom to avoid dividing by zero
-        gadget_follow_strat = np.where(denom == 0, 0.5, gadget_regrets_positives[0] / safe_denom)
+        safe_denom = cp.where(denom == 0, 1, denom) # remove zeros from denom to avoid dividing by zero
+        gadget_follow_strat = cp.where(denom == 0, 0.5, gadget_regrets_positives[0] / safe_denom)
 
         """
         # DEBUG
@@ -561,9 +574,9 @@ class CFRTree:
         #          Un-normalized = prob opp. player reaches the root state given they have the hand (i, j)
         #          Normalized    = prob opp. player reaches the root state and has the hand (i, j)
         #
-        opp_pid = (root_game.game_pointer + 1) % 2
-        if np.sum(gadget_follow_strat) != 0:
-            self.ranges[self.range_map[0, opp_pid], :] = gadget_follow_strat / np.sum(gadget_follow_strat)
+        opp_pid = (self.players[0] + 1) % 2
+        if cp.sum(gadget_follow_strat) != 0:
+            self.ranges[self.range_map[0, opp_pid], :] = gadget_follow_strat / cp.sum(gadget_follow_strat)
         else:
             self.ranges[self.range_map[0, opp_pid], :] = gadget_follow_strat # ALL ZEROS
 
@@ -601,71 +614,66 @@ class CFRTree:
         #    - Always selecting Follow    yields a fixed payoff equal to the opp. cfr values at the root node
         #    - Always selecting Terminate yields a fixed payoff equal to the terminate values
         #
-        self.gadget_regrets[0] = np.maximum(self.gadget_regrets[0] + self.values[0, opp_pid, :] - new_gadget_values, 0) # gadget value @ t
-        self.gadget_regrets[1] = np.maximum(self.gadget_regrets[1] + self.terminate_values - self.gadget_values, 0)    # gadget value @ t + 1
+        self.gadget_regrets[0] = cp.maximum(self.gadget_regrets[0] + self.values[0, opp_pid, :] - new_gadget_values, 0) # gadget value @ t
+        self.gadget_regrets[1] = cp.maximum(self.gadget_regrets[1] + self.terminate_values - self.gadget_values, 0)    # gadget value @ t + 1
 
         #
         # Update the gadget values to the new values
         #
         self.gadget_values = new_gadget_values
-        
-        """
-        # DEBUG
-        import ipdb; ipdb.set_trace()
-        """
     
     def update_ranges(self):
         for parent in range(self.n_nodes):
-            player = self.game_states[parent].game_pointer # NOTE - This could be replaced by a "owner" vector
-            for child in np.where(self.tree[parent, :] >= 0)[0]:
-                action = self.all_actions.index(self.tree[parent, child]) # NOTE - This is bad
+            player = self.players[parent]
+            for child in cp.where(self.tree[parent, :] >= 0)[0]:
+                action = self.tree[parent, child]
                 self.ranges[self.range_map[child, player], :] = self.ranges[self.range_map[parent, player], :] * self.strategies[self.strat_idxs[parent, action], :]
     
     def update_values_w_cfvn(self):
-        inactive_nodes = np.where((self.node_types == 0) & (~self.active_nodes))[0] # non-active decision nodes
-        batch_vects = np.zeros((inactive_nodes.shape[0], 2709)) # (num. of inactive nodes, cfvn input vector size)
+        inactive_nodes = cp.where((self.node_types == 0) & (~self.active_nodes))[0] # non-active decision nodes
+        batch_vects = cp.zeros((inactive_nodes.shape[0], 2709)) # (num. of inactive nodes, cfvn input vector size)
         batch_actions = []
         # TODO - vectorize this loop
         for batch_idx, node in enumerate(inactive_nodes):
             batch_vects[batch_idx, :] = self.cfvn.to_vect(
-                        self.game_states[node], 
+                        self.game_states[int(node)], 
                         self.ranges[self.range_map[node, :], :]
             )
             # NOTE - I hate this
             # TODO - Rework how we handle actions
             batch_actions.append([self.all_actions.index(a.value)
-                                  for a in self.game_states[node].get_legal_actions()])
+                                  for a in self.game_states[int(node)].get_legal_actions()])
 
         strats, vals = self.cfvn.query(batch_vects)
+        strats, vals = cp.array(strats), cp.array(vals)
         # TODO - vectorize this loop
         for batch_idx, node in enumerate(inactive_nodes):
             self.strategies[self.strat_idxs[node, batch_actions[batch_idx]], :] = strats[batch_idx, batch_actions[batch_idx], :]
         self.values[inactive_nodes, :, :] = vals
-    
+
     def update_values(self):
         for node in range(self.n_nodes-1, -1, -1):
             # Active decision node
             if self.node_types[node] == 0 and self.active_nodes[node]: 
-                player = self.game_states[node].game_pointer # NOTE - Could be replaced
-                action_idxs = self.tree[node, np.where(self.tree[node] != -1)][0] # NOTE - This is bad
-                actions = np.array([self.all_actions.index(a) for a in action_idxs])
+                player = self.players[node]
+                actions = self.tree[node, cp.where(self.tree[node] != -1)][0]
                 # Update player
                 strat = self.strategies[self.strat_idxs[player, actions], :] # shape = (num. of actions, 1326)
-                children = np.where(self.tree[node] != -1)
+                children = cp.where(self.tree[node] != -1)
                 child_values = self.values[children, player, :][0] # shape = (num. of actions, 1326)
-                self.values[node, player, :] = np.sum(strat * child_values, axis=0)
+                self.values[node, player, :] = cp.sum(strat * child_values, axis=0)
                 # Update opponent
                 opponent = (player + 1) % 2
-                self.values[node, opponent, :] = np.sum(self.values[children, opponent, :], axis=1)
+                self.values[node, opponent, :] = cp.sum(self.values[children, opponent, :], axis=1)
                 # Update regrets
-                self.regrets[self.strat_idxs[player, actions], :] = np.maximum(
+                self.regrets[self.strat_idxs[player, actions], :] = cp.maximum(
                     self.regrets[self.strat_idxs[player, actions], :] + child_values - self.values[node, opponent, :],
                     0
                 )
                 # Update strategy
-                regret_sum = np.sum(self.regrets[self.strat_idxs[player, actions], :], axis=0, keepdims=True)
-                denom = np.where(regret_sum == 0, 1, regret_sum)
-                self.strategies[self.strat_idxs[player, actions], :] = np.where(
+                regret_sum = cp.sum(self.regrets[self.strat_idxs[player, actions], :], axis=0, keepdims=True)
+                denom = cp.where(regret_sum == 0, 1, regret_sum)
+                self.strategies[self.strat_idxs[player, actions], :] = cp.where(
                     regret_sum == 0,
                     1/actions.shape[0],
                     self.regrets[self.strat_idxs[player, actions], :]/denom
@@ -677,8 +685,8 @@ class CFRTree:
                                   for p in self.game_states[node].players]) # NOTE - This is bad
                 # Non-showdown
                 if num_active != 1:
-                    payout = np.array(self.game_states[node].get_payoffs()) # NOTE - This is bad
-                    self.values[node, :, :] = payout[:, None] * np.sum(self.ranges[self.range_map[node, :], :], axis=1)[:, None]
+                    payout = cp.array(self.game_states[node].get_payoffs()) # NOTE - This is bad
+                    self.values[node, :, :] = payout[:, None] * cp.sum(self.ranges[self.range_map[node, :], :], axis=1)[:, None]
                 # Showdown
                 else:
                     #
@@ -692,16 +700,18 @@ class CFRTree:
                     # then sum each row to get (1326,) result
                     #
                     pot = self.game_states[node].dealer.pot
-                    self.values[node, 0, :] = 0.5 * pot * np.sum(
+                    self.values[node, 0, :] = 0.5 * pot * cp.sum(
                         self.payoffs[self.payoffs_idxs[node], 0, :, :] *
                         self.ranges[self.range_map[node, 1], :][np.newaxis, :],
                         axis=1
                     )
-                    self.values[node, 1, :] = 0.5 * pot * np.sum(
+                    self.values[node, 1, :] = 0.5 * pot * cp.sum(
                         self.payoffs[self.payoffs_idxs[node], 1, :, :] *
-                        self.ranges[self.range_map[node, 0], :][np.newaxis, :],
+                        self.ranges[self.range_map[node, 0], :][cp.newaxis, :],
                         axis=1
                     )
+
+
 
     #
     # One iteration of CFR
@@ -712,28 +722,31 @@ class CFRTree:
     # TODO - Implement returning querries
     #
     def cfr_update(self) -> list[np.ndarray]:
-        #
         # Downward pass - propagate range probabilities
-        #
-        strt = time.time()
+        #start = cp.cuda.Event(); end = cp.cuda.Event()
+        #start.record()
         self.update_ranges()
-        print(f'update_ranges {time.time() - strt} s')
-        #
+        #end.record(); end.synchronize()
+        #print("update_ranges took", cp.cuda.get_elapsed_time(start, end), "ms")
         # Update non-active decision node values with the cfvn
-        #
-        strt = time.time()
+        #start = cp.cuda.Event(); end = cp.cuda.Event()
+        #start.record()
         self.update_values_w_cfvn()
-        print(f'update_values_w_cfvn {time.time() - strt} s')
-        #
+        #end.record(); end.synchronize()
+        #print("update_values_w_cfvn took", cp.cuda.get_elapsed_time(start, end), "ms")
         # Upward pass - bubble up expected values
-        #
-        strt = time.time()
+        #start = cp.cuda.Event(); end = cp.cuda.Event()
+        #start.record()
         self.update_values()
-        print(f'update_values {time.time() - strt} s')
+        #end.record(); end.synchronize()
+        #print("update_values took", cp.cuda.get_elapsed_time(start, end), "ms")
         # Update gadget game regrets
-        strt = time.time()
+        #start = cp.cuda.Event(); end = cp.cuda.Event()
+        #start.record()
         self.update_gadget_regrets()
-        print(f'update_gadget_regrets {time.time() - strt} s')
+        #end.record(); end.synchronize()
+        #print("update_gadget_regrets took", cp.cuda.get_elapsed_time(start, end), "ms")
+        #print(f'update_gadget_regrets {time.time() - strt} s')
         # Return a list of querries that were made to the cfvn
         return [] # NOTE - Not implemented
             
@@ -767,7 +780,7 @@ def compute_payoff_matrix(game: NolimitholdemGame) -> np.ndarray:
     deck = sorted(init_standard_deck(), key=lambda x: x.to_int()) 
     trey_deck = [card.to_treys() for card in deck]
     community_cards = [card.to_treys() for card in game.public_cards]
-    community_idxs = [card.to_int() for card in game.public_cards]
+    community_idxs = cp.array([card.to_int() for card in game.public_cards])
 
     #
     # Useful for converting from 1d coor to 2d corrs
@@ -775,18 +788,18 @@ def compute_payoff_matrix(game: NolimitholdemGame) -> np.ndarray:
     # upper_i[hand_idx] = card1 idx
     # upper_j[hand_idx] = card2 idx
     #
-    upper_i, upper_j = np.triu_indices(52, k=1)
+    upper_i, upper_j = cp.triu_indices(52, k=1)
 
     #
     # Get a vector of hand ranks
     #
     evaluator = treys.Evaluator()
-    hand_evals = np.ones(1326) * np.inf
+    hand_evals = cp.ones(1326) * cp.inf
     for hand in range(1326):
         x, y = upper_i[hand], upper_j[hand]
         if x in community_idxs or y in community_idxs:
             continue
-        hand_evals[hand] = evaluator.evaluate(community_cards, [trey_deck[x], trey_deck[y]])
+        hand_evals[hand] = evaluator.evaluate(community_cards, [trey_deck[int(x)], trey_deck[int(y)]])
 
     # Vectorized version of get_hand_payoff
     def get_hand_payoff(pid, hand1, hand2):
@@ -807,10 +820,10 @@ def compute_payoff_matrix(game: NolimitholdemGame) -> np.ndarray:
 
         # Check 2: Community cards
         has_community_cards = (
-            np.isin(h1_card1, community_cards) |
-            np.isin(h1_card2, community_cards) |
-            np.isin(h2_card1, community_cards) |
-            np.isin(h2_card2, community_cards)
+            cp.isin(h1_card1, community_idxs) |
+            cp.isin(h1_card2, community_idxs) |
+            cp.isin(h2_card1, community_idxs) |
+            cp.isin(h2_card2, community_idxs)
         )
 
         # Valid hands pass both checks
@@ -823,18 +836,18 @@ def compute_payoff_matrix(game: NolimitholdemGame) -> np.ndarray:
         player2_wins = hand_evals[hand1] > hand_evals[hand2]
 
         # Initialize payoff vector
-        payoffs = np.zeros_like(hand1, dtype=np.float64)  # Default all payoffs to 0
+        payoffs = cp.zeros_like(hand1, dtype=cp.float64)  # Default all payoffs to 0
 
         # Assign the winning hands 1s and losing hands -1s
-        payoffs = np.where(
+        payoffs = cp.where(
             player1_wins & valid_hands, 
-            np.where(pid==0, 1, -1),
+            cp.where(pid==0, 1, -1),
             payoffs
         )
 
-        payoffs = np.where(
+        payoffs = cp.where(
             player2_wins & valid_hands, 
-            np.where(pid==1, 1, -1), 
+            cp.where(pid==1, 1, -1), 
             payoffs
         )
 
@@ -854,10 +867,10 @@ def compute_payoff_matrix(game: NolimitholdemGame) -> np.ndarray:
     #
     #        where payoffs.shape = shape (as defined above)
     #
-    payoffs = np.fromfunction(lambda pid, hand1, hand2: get_hand_payoff(pid.astype(int), 
-                                                                        hand1.astype(int),
-                                                                        hand2.astype(int)), 
-                                                                        shape, dtype=np.float64)
+    payoffs = cp.fromfunction(lambda pid, hand1, hand2: get_hand_payoff(cp.array(pid, dtype=cp.int8), 
+                                                                        cp.array(hand1, dtype=cp.int8),
+                                                                        cp.array(hand2, dtype=cp.int8)), 
+                                                                        shape, dtype=cp.float64)
     
     return payoffs
 

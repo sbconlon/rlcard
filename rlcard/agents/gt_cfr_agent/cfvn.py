@@ -31,6 +31,7 @@ from __future__ import annotations  # Enables forward references
 from multiprocessing import Process, Queue
 from multiprocessing.shared_memory import SharedMemory
 import numpy as np
+import cupy as cp
 from queue import Full, Empty
 import tensorflow as tf
 from tensorflow.keras import Model
@@ -700,30 +701,30 @@ class CounterfactualValueNetwork:
     # Note: These are the features used in the literature. Other features could be
     #       explored in the future.
     #
-    def to_vect(self, game : NolimitholdemGame, ranges : np.ndarray, chance_actor : bool=False):
+    def to_vect(self, game : NolimitholdemGame, ranges : cp.array, chance_actor : bool=False):
         #
         # All elements of the returned vector must be of the same type.
         #
         # For now, we hard code this to be np.float64, the largest data type
         # of the features.
         #
-        self.data_type = np.float64
+        self.data_type = cp.float64
         #
         # --> Featurize game object
         #
         # N-hot encoding of public cards
         #
-        public_card_encoding = np.zeros(52, dtype=self.data_type)
+        public_card_encoding = cp.zeros(52, dtype=self.data_type)
         public_card_encoding[[card.to_int() for card in game.public_cards]] = 1
         #
         # Player pot commitments (normalized by stack size at the start of the hand)
         #
-        pot_commitments = np.array([player.in_chips / (player.remained_chips + player.in_chips)
+        pot_commitments = cp.array([player.in_chips / (player.remained_chips + player.in_chips)
                                         for player in game.players], dtype=self.data_type)
         #
         # 1-hot acting player encoding
         #
-        acting_player = np.zeros(game.num_players + 1, dtype=self.data_type)
+        acting_player = cp.zeros(game.num_players + 1, dtype=self.data_type)
         acting_player[-1 if chance_actor else game.game_pointer] = 1
         #
         # --> Featurize player ranges
@@ -734,7 +735,7 @@ class CounterfactualValueNetwork:
         #
         # --> Concat the game and range features into a single feature vector
         #
-        return np.concatenate(
+        return cp.concatenate(
                                 [
                                   public_card_encoding, 
                                   pot_commitments,
@@ -765,7 +766,7 @@ class CounterfactualValueNetwork:
     #
     # Note: the input should come from the to_vect() function.
     #
-    def query(self, input : np.ndarry) -> tuple[np.ndarray]:
+    def query(self, input : cp.ndarry) -> tuple[np.ndarray]:
         #
         # Verify that the input vector matches the dimensions of the network
         #
@@ -774,7 +775,7 @@ class CounterfactualValueNetwork:
         #
         # Run inference
         #
-        tf_strategy, tf_values =  self.network(input)
+        tf_strategy, tf_values =  self.network(cp.asnumpy(input)) # tf model doesn't directly accept cp array
         #
         # Post-processing
         #
@@ -785,10 +786,10 @@ class CounterfactualValueNetwork:
         sums = strategy.sum(axis=0, keepdims=0)
         strategy /= sums
         # Zero hands with invalid cards
-        public_card_idxs = np.where(input[0, :52] == 1)[0]
+        public_card_idxs = cp.where(input[0, :52] == 1)[0]
         for card in public_card_idxs:
-            strategy[:, :, get_card_coors(card)] = 0
-            values[:, :, get_card_coors(card)] = 0
+            strategy[:, :, get_card_coors(int(card))] = 0
+            values[:, :, get_card_coors(int(card))] = 0
         return strategy, values
 
 
