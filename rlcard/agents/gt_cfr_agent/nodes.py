@@ -20,11 +20,9 @@ from __future__ import annotations  # Enables forward references
 from abc import ABC, abstractmethod
 import copy
 from itertools import permutations, combinations
+from numba import jit, njit
 import numpy as np
-import tensorflow as tf
 import time
-#import cupy as np
-#from sparse import COO
 import treys
 
 # Internal imports
@@ -67,7 +65,7 @@ class CFRTree:
         #
         #   - Adjacency matrix
         #
-        #   - tree[i, j] = action id if node j is a descendant of node i otherwise -1
+        #   - tree[i, j] = action index if node j is a descendant of node i otherwise -1
         #
         #   - Example
         #
@@ -88,7 +86,8 @@ class CFRTree:
         #   - Vector of length = # of nodes
         #
         #   - node_types[i] = 0 if node i is a decision node
-        #                     1 if node i is a terminal node
+        #                     1 if node i is a non-showdown terminal node
+        #                     2 if node i is a showdown terminal node
         #
         #   - Example
         #
@@ -109,6 +108,15 @@ class CFRTree:
         #
         self.game_states: list[NolimitholdemGame]
         self.game_states = []
+        #
+        # Players
+        #
+        #    - Vector of length = # of nodes
+        #
+        #    - players[i] = player id of the acting player if node i is a decision node
+        #                   -1 if node i is a terminal node
+        #
+        self.players = np.array([], dtype=np.int8)
         #
         # Activate nodes
         #
@@ -175,6 +183,19 @@ class CFRTree:
         #          = regret of player at node i selecting action j with hand k 
         #
         self.regrets = np.array([[]], dtype=np.float32)
+        #
+        # Pots
+        #
+        #   - Vector of size = # of nodes
+        #
+        #   - pots[i] = 
+        #
+        #       If node i is a non-showdown terminal node, 
+        #       then it is the value of the pot.
+        #
+        #       -1 otherwise.
+        #
+        self.pots = np.array([[]], dtype=np.float32)
         #
         # Board string to payoff idx
         #
@@ -314,6 +335,7 @@ class CFRTree:
         #
         self.tree = np.array([[-1]], dtype=np.int8) # nodes are never descendants of themselves
         self.node_types = np.array([0], dtype=np.int8) # all root nodes are decision nodes
+        self.players = np.array([game_state.game_pointer], dtype=np.int8)
         self.game_states.append(game_state)
         self.active_nodes = np.array([False], dtype=np.bool_)
         self.range_map = np.array([np.arange(self.n_players)], dtype=np.int8)
@@ -322,6 +344,7 @@ class CFRTree:
         legal_actions = [self.all_actions.index(action.value) for action in game_state.get_legal_actions()]
         self.strategies = random_strategy(len(legal_actions), game_state.public_cards)
         self.regrets = np.zeros((len(legal_actions), 1326))
+        self.pots = np.array([-1], dtype=np.float32)
         root_strat_idxs = [-1] * len(self.all_actions)
         for idx, action in enumerate(legal_actions):
             root_strat_idxs[action] = idx
@@ -356,12 +379,16 @@ class CFRTree:
         #
         # Determine the node type for the child
         #
+        num_active = lambda game: sum([p.status != PlayerStatus.FOLDED for p in game.players])
         child_type = None
-        if child_game.is_over():
-            child_type = 1 # Terminal node
+        if child_game.is_over(): # Terminal node
+            if num_active(child_game) == 1:
+                child_type = 1 # Non-showdown
+            else:
+                child_type = 2 # Showdown
         elif (parent_game.stage != parent_game.stage and 
             not child_game.stage in (Stage.END_HIDDEN, Stage.SHOWDOWN)):
-            child_type = 2 # Chance node
+            child_type = 3 # Chance node
         elif child_game.stage in (Stage.PREFLOP, Stage.FLOP, Stage.TURN, Stage.RIVER):
             child_type = 0 # Decision node
         #
@@ -371,11 +398,15 @@ class CFRTree:
         self.tree = np.hstack([self.tree, new_column])
         new_row = np.ones(self.n_nodes+1, dtype=np.int8) * -1
         self.tree = np.vstack([self.tree, new_row])
-        self.tree[parent_id, self.n_nodes] = action_id
+        self.tree[parent_id, self.n_nodes] = self.all_actions.index(action_id)
         #
         # Add child to node types
         #
         self.node_types = np.append(self.node_types, child_type)
+        if child_type == 0:
+            self.players = np.append(self.players, child_game.game_pointer)
+        else:
+            self.players = np.append(self.players, -1)
         #
         # Add child to game states
         #
@@ -390,7 +421,7 @@ class CFRTree:
         # Add child range
         #
         child_id = self.n_nodes
-        player_id = child_game.game_pointer
+        player_id = self.players[child_id]
         action_idx = self.all_actions.index(action_id)
         child_range_idxs = self.range_map[parent_id]
         self.range_map = np.vstack([self.range_map, child_range_idxs])
@@ -419,25 +450,26 @@ class CFRTree:
         #
         # Add payoffs
         #
-        if child_type == 1: # Terminal node
-            num_active = sum([p.status != PlayerStatus.FOLDED for p in child_game.players])
-            if num_active > 1: # Showdown
-                board_str = five_cards_to_str(child_game.public_cards)
-                if board_str in self.board_to_idx: # Cache hit
-                    self.payoffs_idxs = np.append(self.payoffs_idxs, self.board_to_idx[board_str])
-                else: # Cache miss
-                    payoff_matrix = compute_payoff_matrix(child_game)
-                    payoff_matrix = np.expand_dims(payoff_matrix, axis=0)
-                    if self.payoffs:
-                        self.payoffs = np.concatenate([self.payoffs, payoff_matrix], axis=0)
-                    else:
-                        self.payoffs = payoff_matrix
-                    self.payoffs_idxs = np.append(self.payoffs_idxs, self.payoffs.shape[0]-1)
-                    self.board_to_idx[board_str] = self.payoffs_idxs[child_id]
-            else: # No showdown
-                self.payoffs_idxs = np.append(self.payoffs_idxs, -1)
+        if child_type == 1: # No showdown
+            self.payoffs_idxs = np.append(self.payoffs_idxs, -1)
+            self.pots = np.append(self.pots, child_game.dealer.pot)
+        elif child_type == 2: # Showdown
+            self.pots = np.append(self.pots, -1)
+            board_str = five_cards_to_str(child_game.public_cards)
+            if board_str in self.board_to_idx: # Cache hit
+                self.payoffs_idxs = np.append(self.payoffs_idxs, self.board_to_idx[board_str])
+            else: # Cache miss
+                payoff_matrix = compute_payoff_matrix(child_game)
+                payoff_matrix = np.expand_dims(payoff_matrix, axis=0)
+                if self.payoffs:
+                    self.payoffs = np.concatenate([self.payoffs, payoff_matrix], axis=0)
+                else:
+                    self.payoffs = payoff_matrix
+                self.payoffs_idxs = np.append(self.payoffs_idxs, self.payoffs.shape[0]-1)
+                self.board_to_idx[board_str] = self.payoffs_idxs[child_id]
         else: # None terminal node
             self.payoffs_idxs = np.append(self.payoffs_idxs, -1)
+            self.pots = np.append(self.pots, -1)
         #
         # Update node count
         #
@@ -561,7 +593,7 @@ class CFRTree:
         #          Un-normalized = prob opp. player reaches the root state given they have the hand (i, j)
         #          Normalized    = prob opp. player reaches the root state and has the hand (i, j)
         #
-        opp_pid = (root_game.game_pointer + 1) % 2
+        opp_pid = (self.players[0] + 1) % 2
         if np.sum(gadget_follow_strat) != 0:
             self.ranges[self.range_map[0, opp_pid], :] = gadget_follow_strat / np.sum(gadget_follow_strat)
         else:
@@ -615,11 +647,13 @@ class CFRTree:
         """
     
     def update_ranges(self):
-        for parent in range(self.n_nodes):
-            player = self.game_states[parent].game_pointer # NOTE - This could be replaced by a "owner" vector
-            for child in np.where(self.tree[parent, :] >= 0)[0]:
-                action = self.all_actions.index(self.tree[parent, child]) # NOTE - This is bad
-                self.ranges[self.range_map[child, player], :] = self.ranges[self.range_map[parent, player], :] * self.strategies[self.strat_idxs[parent, action], :]
+        jit_update_ranges(self.n_nodes, 
+                          self.tree, 
+                          self.players, 
+                          self.range_map, 
+                          self.ranges, 
+                          self.strat_idxs, 
+                          self.strategies)
     
     def update_values_w_cfvn(self):
         inactive_nodes = np.where((self.node_types == 0) & (~self.active_nodes))[0] # non-active decision nodes
@@ -643,65 +677,20 @@ class CFRTree:
         self.values[inactive_nodes, :, :] = vals
     
     def update_values(self):
-        for node in range(self.n_nodes-1, -1, -1):
-            # Active decision node
-            if self.node_types[node] == 0 and self.active_nodes[node]: 
-                player = self.game_states[node].game_pointer # NOTE - Could be replaced
-                action_idxs = self.tree[node, np.where(self.tree[node] != -1)][0] # NOTE - This is bad
-                actions = np.array([self.all_actions.index(a) for a in action_idxs])
-                # Update player
-                strat = self.strategies[self.strat_idxs[player, actions], :] # shape = (num. of actions, 1326)
-                children = np.where(self.tree[node] != -1)
-                child_values = self.values[children, player, :][0] # shape = (num. of actions, 1326)
-                self.values[node, player, :] = np.sum(strat * child_values, axis=0)
-                # Update opponent
-                opponent = (player + 1) % 2
-                self.values[node, opponent, :] = np.sum(self.values[children, opponent, :], axis=1)
-                # Update regrets
-                self.regrets[self.strat_idxs[player, actions], :] = np.maximum(
-                    self.regrets[self.strat_idxs[player, actions], :] + child_values - self.values[node, opponent, :],
-                    0
-                )
-                # Update strategy
-                regret_sum = np.sum(self.regrets[self.strat_idxs[player, actions], :], axis=0, keepdims=True)
-                denom = np.where(regret_sum == 0, 1, regret_sum)
-                self.strategies[self.strat_idxs[player, actions], :] = np.where(
-                    regret_sum == 0,
-                    1/actions.shape[0],
-                    self.regrets[self.strat_idxs[player, actions], :]/denom
-                ) # NOTE - This might be wrong?
-                # TODO - Add cummulative strategy update here
-            # Terminal node
-            elif self.node_types[node] == 1:
-                num_active = sum([p.status != PlayerStatus.FOLDED 
-                                  for p in self.game_states[node].players]) # NOTE - This is bad
-                # Non-showdown
-                if num_active != 1:
-                    payout = np.array(self.game_states[node].get_payoffs()) # NOTE - This is bad
-                    self.values[node, :, :] = payout[:, None] * np.sum(self.ranges[self.range_map[node, :], :], axis=1)[:, None]
-                # Showdown
-                else:
-                    #
-                    # self.payoffs[node, 0, :, :]
-                    #    = (1326, 1326) matrix
-                    #
-                    # self.ranges[node, 1, :][np.newaxis, :]
-                    #    = (1, 1326) matrix
-                    #
-                    # We multiply each row of the payoff matrix by the range vector,
-                    # then sum each row to get (1326,) result
-                    #
-                    pot = self.game_states[node].dealer.pot
-                    self.values[node, 0, :] = 0.5 * pot * np.sum(
-                        self.payoffs[self.payoffs_idxs[node], 0, :, :] *
-                        self.ranges[self.range_map[node, 1], :][np.newaxis, :],
-                        axis=1
-                    )
-                    self.values[node, 1, :] = 0.5 * pot * np.sum(
-                        self.payoffs[self.payoffs_idxs[node], 1, :, :] *
-                        self.ranges[self.range_map[node, 0], :][np.newaxis, :],
-                        axis=1
-                    )
+        jit_update_values(self.n_nodes, 
+                          self.tree, 
+                          self.node_types,
+                          self.players,
+                          self.active_nodes, 
+                          self.range_map,
+                          self.ranges,
+                          self.strat_idxs,
+                          self.strategies,
+                          self.values,
+                          self.regrets, 
+                          self.pots,
+                          self.payoffs_idxs,
+                          self.payoffs)
 
     #
     # One iteration of CFR
@@ -715,29 +704,221 @@ class CFRTree:
         #
         # Downward pass - propagate range probabilities
         #
-        strt = time.time()
+        #strt = time.time()
         self.update_ranges()
-        print(f'update_ranges {time.time() - strt} s')
+        #print(f'update_ranges {time.time() - strt} s')
         #
         # Update non-active decision node values with the cfvn
         #
-        strt = time.time()
+        #strt = time.time()
         self.update_values_w_cfvn()
-        print(f'update_values_w_cfvn {time.time() - strt} s')
+        #print(f'update_values_w_cfvn {time.time() - strt} s')
         #
         # Upward pass - bubble up expected values
         #
-        strt = time.time()
+        #strt = time.time()
         self.update_values()
-        print(f'update_values {time.time() - strt} s')
+        #print(f'update_values {time.time() - strt} s')
         # Update gadget game regrets
-        strt = time.time()
+        #strt = time.time()
         self.update_gadget_regrets()
-        print(f'update_gadget_regrets {time.time() - strt} s')
+        #print(f'update_gadget_regrets {time.time() - strt} s')
         # Return a list of querries that were made to the cfvn
         return [] # NOTE - Not implemented
-            
-                    
+    
+
+
+#####################################
+#                                   #
+#       Numba JIT Functions         #
+#                                   #
+##################################### 
+
+"""
+@jit(nopython=True)
+def jit_update_ranges(n_nodes: int, tree: np.ndarray, players: np.ndarray, range_map: np.ndarray, 
+                      ranges: np.ndarray, strat_idxs: np.ndarray, strategies: np.ndarray) -> None:
+    for parent in range(n_nodes):
+            player = players[parent]
+            for child in np.where(tree[parent, :] >= 0)[0]:
+                action = tree[parent, child]
+                ranges[range_map[child, player], :] = ranges[range_map[parent, player], :] * strategies[strat_idxs[parent, action], :]
+"""
+
+@njit
+def jit_update_ranges(n_nodes, tree, players, range_map, ranges, strat_idxs, strategies):
+    for parent in range(n_nodes):
+        player = players[parent]
+        for child in range(tree.shape[1]):
+            if tree[parent, child] >= 0:
+                action = tree[parent, child]
+                parent_idx = range_map[parent, player]
+                child_idx = range_map[child, player]
+                strat_idx = strat_idxs[parent, action]
+
+                for h in range(1326):
+                    ranges[child_idx, h] = ranges[parent_idx, h] * strategies[strat_idx, h]
+
+"""
+@jit(nopython=True)
+def jit_update_values(n_nodes: int, tree: np.ndarray, node_types: np.ndarray, players: np.ndarray, active_nodes: np.ndarray, 
+                      range_map: np.ndarray, ranges: np.ndarray, strat_idxs: np.ndarray, strategies: np.ndarray, values: np.ndarray,
+                      regrets: np.ndarray, pots: np.ndarray, payoffs_idxs: np.ndarray, payoffs: np.ndarray):
+    for node in range(n_nodes-1, -1, -1):
+        # Active decision node
+        if node_types[node] == 0 and active_nodes[node]: 
+            player = players[node]
+            row = tree[node]
+            valid_indices = np.where(row != -1)[0]
+            actions = row[valid_indices]
+            # Update player
+            strat = strategies[strat_idxs[player, actions], :] # shape = (num. of actions, 1326)
+            children = np.where(row != -1)[0]
+            child_values = values[children, player, :] # shape = (num. of actions, 1326)
+            values[node, player, :] = np.sum(strat * child_values, axis=0)
+            # Update opponent
+            opponent = (player + 1) % 2
+            values[node, opponent, :] = np.sum(values[children, opponent, :], axis=0)
+            # Update regrets
+            regrets[strat_idxs[player, actions], :] = np.maximum(
+                regrets[strat_idxs[player, actions], :] + child_values - values[node, opponent, :],
+                0
+            )
+            # Update strategy
+            regret_sum = np.sum(regrets[strat_idxs[player, actions], :], axis=0)
+            regret_sum = regret_sum.reshape(1, regret_sum.shape[0])
+            denom = np.where(regret_sum == 0, 1, regret_sum)
+            strategies[strat_idxs[player, actions], :] = np.where(
+                regret_sum == 0,
+                1/actions.shape[0],
+                regrets[strat_idxs[player, actions], :]/denom
+            ) # NOTE - This might be wrong?
+            # TODO - Add cummulative strategy update here
+        # Non-showdown terminal node
+        elif node_types[node] == 1:
+            #payout = np.array(self.game_states[node].get_payoffs())
+            payout = np.array([100, -100]) # TODO - THIS IS WRONG, TEMP!!!
+            values[node, :, :] = payout[:, None] * np.sum(ranges[range_map[node, :], :], axis=1)[:, None]
+        # Showdown terminal node
+        elif node_types[node] == 2:
+            #
+            # self.payoffs[node, 0, :, :]
+            #    = (1326, 1326) matrix
+            #
+            # self.ranges[node, 1, :][np.newaxis, :]
+            #    = (1, 1326) matrix
+            #
+            # We multiply each row of the payoff matrix by the range vector,
+            # then sum each row to get (1326,) result
+            #
+            pot = pots[node]
+            values[node, 0, :] = 0.5 * pot * np.sum(
+                payoffs[payoffs_idxs[node], 0, :, :] *
+                ranges[range_map[node, 1], :][np.newaxis, :],
+                axis=1
+            )
+            values[node, 1, :] = 0.5 * pot * np.sum(
+                payoffs[payoffs_idxs[node], 1, :, :] *
+                ranges[range_map[node, 0], :][np.newaxis, :],
+                axis=1
+            )
+"""
+
+@njit
+def jit_update_values(n_nodes, tree, node_types, players, active_nodes,
+                      range_map, ranges, strat_idxs, strategies, values,
+                      regrets, pots, payoffs_idxs, payoffs):
+    
+    for node in range(n_nodes - 1, -1, -1):
+        
+        if node_types[node] == 0 and active_nodes[node]:
+            player = players[node]
+            opponent = (player + 1) % 2
+
+            row = tree[node]
+            valid_idx_count = 0
+            for i in range(row.shape[0]):
+                if row[i] != -1:
+                    valid_idx_count += 1
+
+            actions = np.empty(valid_idx_count, dtype=np.int64)
+            children = np.empty(valid_idx_count, dtype=np.int64)
+            action_idxs = np.empty(valid_idx_count, dtype=np.int64)
+
+            idx = 0
+            for i in range(row.shape[0]):
+                if row[i] != -1:
+                    a = row[i]
+                    actions[idx] = a
+                    children[idx] = i
+                    action_idxs[idx] = strat_idxs[player, a]
+                    idx += 1
+
+            # Player update: values[node, player, :]
+            for h in range(1326):
+                s = 0.0
+                for a in range(valid_idx_count):
+                    s += strategies[action_idxs[a], h] * values[children[a], player, h]
+                values[node, player, h] = s
+
+            # Opponent update: values[node, opponent, :]
+            for h in range(1326):
+                s = 0.0
+                for a in range(valid_idx_count):
+                    s += values[children[a], opponent, h]
+                values[node, opponent, h] = s
+
+            # Regret update
+            for a in range(valid_idx_count):
+                idx = action_idxs[a]
+                for h in range(1326):
+                    r = regrets[idx, h] + values[children[a], player, h] - values[node, opponent, h]
+                    regrets[idx, h] = max(r, 0.0)
+
+            # Strategy update
+            regret_sum = np.zeros(1326)
+            for a in range(valid_idx_count):
+                idx = action_idxs[a]
+                for h in range(1326):
+                    regret_sum[h] += regrets[idx, h]
+
+            for a in range(valid_idx_count):
+                idx = action_idxs[a]
+                for h in range(1326):
+                    if regret_sum[h] == 0:
+                        strategies[idx, h] = 1.0 / valid_idx_count
+                    else:
+                        strategies[idx, h] = regrets[idx, h] / regret_sum[h]
+
+        elif node_types[node] == 1:
+            # TEMP payout
+            payout = np.array([100.0, -100.0])
+            for p in range(2):
+                r_sum = 0.0
+                for h in range(1326):
+                    r_sum += ranges[range_map[node, p], h]
+                for h in range(1326):
+                    values[node, p, h] = payout[p] * r_sum
+
+        elif node_types[node] == 2:
+            pot = pots[node]
+            payoff_idx = payoffs_idxs[node]
+
+            # Player 0
+            for i in range(1326):
+                s = 0.0
+                for j in range(1326):
+                    s += payoffs[payoff_idx, 0, i, j] * ranges[range_map[node, 1], j]
+                values[node, 0, i] = 0.5 * pot * s
+
+            # Player 1
+            for i in range(1326):
+                s = 0.0
+                for j in range(1326):
+                    s += payoffs[payoff_idx, 1, i, j] * ranges[range_map[node, 0], j]
+                values[node, 1, i] = 0.5 * pot * s
+
+
 
 #####################################
 #                                   #
