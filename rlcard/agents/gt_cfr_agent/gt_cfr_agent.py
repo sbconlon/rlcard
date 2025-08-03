@@ -584,6 +584,7 @@ class GTCFRSolver():
         #
         # Run for a fixed number of value updates on the tree.
         #
+        import time; strt = time.time()
         got, added = 0, 0
         for i in range(math.ceil(1/self.n_expansions_per_regret_updates)):
             #print(f'{i} / {math.ceil(1/self.n_expansions_per_regret_updates)}')
@@ -610,6 +611,7 @@ class GTCFRSolver():
             #
             self.update_gadget_regrets()
         print(f'Got {got} total querries, added {added}')
+        print(f'CFR: {time.time() - strt}')
         """
         print(self.root.print_tree())
         import ipdb; ipdb.set_trace()
