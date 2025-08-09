@@ -667,6 +667,45 @@ class CounterfactualValueNetwork:
                 remote_pdb.set_trace()
 
     #
+    # Return the feature vector prefix for the given game state
+    #
+    # Define the "prefix" as the non-range elements of the vector
+    #
+    # Helper for to_vect()
+    #
+    def get_prefix(self, game: NolimitholdemGame, chance_actor: bool=False) -> np.ndarray:
+        #
+        # All elements of the returned vector must be of the same type.
+        #
+        # For now, we hard code this to be np.float64, the largest data type
+        # of the features.
+        #
+        self.data_type = tf.float32
+        #
+        # --> Featurize game object
+        #
+        # N-hot encoding of public cards
+        #
+        public_card_encoding = np.zeros(52)
+        public_card_encoding[[card.to_int() for card in game.public_cards]] = 1
+        #
+        # Player pot commitments (normalized by stack size at the start of the hand)
+        #
+        pot_commitments = np.array([player.in_chips / (player.remained_chips + player.in_chips)
+                                    for player in game.players])
+        #
+        # 1-hot acting player encoding
+        #
+        acting_player = np.zeros(game.num_players + 1)
+        acting_player[-1 if chance_actor else game.game_pointer] = 1
+        #
+        # Join the vectors together
+        #
+        return tf.cast(tf.concat([public_card_encoding, 
+                                  pot_commitments,
+                                  acting_player], axis=0), self.data_type)
+
+    #
     # Given a game object and player ranges,
     # return a feature vector characterizing the state.
     #
@@ -702,29 +741,9 @@ class CounterfactualValueNetwork:
     #
     def to_vect(self, game : NolimitholdemGame, ranges : np.ndarray, chance_actor : bool=False):
         #
-        # All elements of the returned vector must be of the same type.
+        # --> Get feature vector prefix
         #
-        # For now, we hard code this to be np.float64, the largest data type
-        # of the features.
-        #
-        self.data_type = np.float64
-        #
-        # --> Featurize game object
-        #
-        # N-hot encoding of public cards
-        #
-        public_card_encoding = np.zeros(52, dtype=self.data_type)
-        public_card_encoding[[card.to_int() for card in game.public_cards]] = 1
-        #
-        # Player pot commitments (normalized by stack size at the start of the hand)
-        #
-        pot_commitments = np.array([player.in_chips / (player.remained_chips + player.in_chips)
-                                        for player in game.players], dtype=self.data_type)
-        #
-        # 1-hot acting player encoding
-        #
-        acting_player = np.zeros(game.num_players + 1, dtype=self.data_type)
-        acting_player[-1 if chance_actor else game.game_pointer] = 1
+        prefix = self.get_prefix(game)
         #
         # --> Featurize player ranges
         #
@@ -734,14 +753,7 @@ class CounterfactualValueNetwork:
         #
         # --> Concat the game and range features into a single feature vector
         #
-        return np.concatenate(
-                                [
-                                  public_card_encoding, 
-                                  pot_commitments,
-                                  acting_player,
-                                  range_vect
-                                ]
-                            )
+        return np.concatenate([prefix, range_vect])
 
     #
     # Run inference
@@ -765,7 +777,7 @@ class CounterfactualValueNetwork:
     #
     # Note: the input should come from the to_vect() function.
     #
-    def query(self, input : np.ndarry) -> tuple[np.ndarray]:
+    def query(self, input : tf.Tensor) -> tuple[tf.Tensor]:
         #
         # Verify that the input vector matches the dimensions of the network
         #
