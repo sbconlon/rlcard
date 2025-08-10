@@ -740,9 +740,12 @@ class CFRTree:
             self.strategies[self.strat_idxs[node, batch_actions[batch_idx]], :] = strats[batch_idx, batch_actions[batch_idx], :]
         self.values[inactive_nodes, :, :] = vals
     """
-
+    """
+    # IMPLEMENTATION #1
+    @tf.function(jit_compile=True)
     def update_values_w_cfvn(self):
-        inactive_nodes = tf.where((self.node_types == 0) & (~self.active_nodes))[:, 0] # non-active decision nodes
+        # Get the batch of featurized game states
+        inactive_nodes = tf.cast(tf.where((self.node_types == 0) & (~self.active_nodes))[:, 0], tf.int32) # non-active decision nodes
         batch_vects = tf.concat(
             [
                 tf.gather(self.feat_vect_prefixs, tf.gather(self.vect_idxs, inactive_nodes)),  # vector prefixs
@@ -752,14 +755,76 @@ class CFRTree:
                 )
             ],
             axis=1
-        ) # shape=(num. of inactive nodes, feature vect size)
-
+        )
+        # Query the cfvn
         strats, vals = self.cfvn.query(batch_vects)
-        # TODO - vectorize this loop
-        for batch_idx, node in enumerate(inactive_nodes):
-            self.strategies[self.strat_idxs[node, batch_actions[batch_idx]], :] = strats[batch_idx, batch_actions[batch_idx], :]
-        self.values[inactive_nodes, :, :] = vals
-    
+        # Update the strategy and value matrixes
+        for batch_id in tf.range(tf.shape(inactive_nodes)[0]):
+            node = inactive_nodes[batch_id]
+            legal_actions = tf.cast(tf.where(self.legal_actions[node, :])[:, 0], tf.int32)
+            node_action_pairs = tf.stack(
+                [tf.fill(tf.shape(legal_actions), inactive_nodes[batch_id]), legal_actions], 
+                axis=1
+            )
+            batch_id_action_pairs = tf.stack(
+                [tf.fill(tf.shape(legal_actions), batch_id), legal_actions], 
+                axis=1
+            )
+            self.strategies.scatter_nd_update(
+                tf.expand_dims(tf.gather_nd(self.strat_idxs, node_action_pairs), axis=1), 
+                tf.gather_nd(strats, batch_id_action_pairs)
+            )
+        idxs = tf.expand_dims(inactive_nodes, axis=1)
+        self.values.scatter_nd_update(idxs, vals)
+    """
+    @tf.function(jit_compile=True)
+    def update_values_w_cfvn(self):
+        """
+        # Get the batch of featurized game states
+        inactive_nodes = tf.cast(tf.where((self.node_types == 0) & (~self.active_nodes))[:, 0], tf.int32) # non-active decision nodes
+        N = tf.shape(inactive_nodes)[0]
+        rm = tf.gather(self.range_map, inactive_nodes)
+        ranges_block = tf.gather(self.ranges, rm)
+        ranges_flat  = tf.reshape(ranges_block, [N, -1])
+        vects = tf.concat(
+            [
+                tf.gather(self.feat_vect_prefixs, tf.gather(self.vect_idxs, inactive_nodes)),
+                ranges_flat
+            ], 
+            axis=1
+        )
+        """
+        # Get the batch of featurized game states
+        inactive_nodes = tf.cast(tf.where((self.node_types == 0) & (~self.active_nodes))[:, 0], tf.int32) # non-active decision nodes
+        batch_vects = tf.concat(
+            [
+                tf.gather(self.feat_vect_prefixs, tf.gather(self.vect_idxs, inactive_nodes)),  # vector prefixs
+                tf.reshape(                                                                    # player ranges
+                    tf.gather(self.ranges, tf.gather(self.range_map, inactive_nodes)),
+                    [tf.shape(inactive_nodes)[0], -1]
+                )
+            ],
+            axis=1
+        )
+        # Query the cfvn
+        strats, vals = self.cfvn.query(batch_vects)
+        # Update strategies
+        legal_mask = tf.gather(self.legal_actions, inactive_nodes)
+        na_pairs = tf.cast(tf.where(legal_mask), tf.int32)
+        nodes = tf.gather(inactive_nodes, na_pairs[:, 0])
+        strat_row_ids = tf.gather_nd(
+            self.strat_idxs, 
+            tf.stack([nodes, na_pairs[:, 1]], axis=1)
+        )
+        self.strategies.scatter_nd_update(
+            indices=tf.expand_dims(strat_row_ids, axis=1),
+            updates=tf.gather_nd(strats, na_pairs)
+        )
+        # Update values
+        self.values.scatter_nd_update(
+            indices=tf.expand_dims(inactive_nodes, 1),
+            updates=vals
+        )
 
     def update_values(self):
         pass
@@ -773,7 +838,6 @@ class CFRTree:
     # TODO - Implement returning querries
     #
     def cfr_update(self) -> list[np.ndarray]:
-        print()
         #
         # Downward pass - propagate range probabilities
         #

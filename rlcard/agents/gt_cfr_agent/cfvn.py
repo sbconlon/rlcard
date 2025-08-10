@@ -40,7 +40,7 @@ import time
 
 # Internal imports
 from rlcard.agents.gt_cfr_agent.replay_buffer import ReplayBuffer
-from rlcard.agents.gt_cfr_agent.utils import normalize_columns, get_card_coors
+from rlcard.agents.gt_cfr_agent.utils import normalize_columns, get_card_coors, invalid_hands
 from rlcard.agents.gt_cfr_agent.rwlock import ReadRWLock, WriteRWLock, ReadWriteLock
 from rlcard.games.nolimitholdem.round import Action
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
@@ -150,7 +150,7 @@ class CounterfactualValueNetwork:
         # NOTE - For now hard code this to float64, in the future
         #        lower precision options could be interesting to explore.
         #
-        self.data_type = np.float64
+        #self.data_type = np.float64
 
         #
         # NOTE - we need the worker processes to share the same model weights
@@ -193,6 +193,24 @@ class CounterfactualValueNetwork:
         # Putting it all together into a model object
         #
         self.network = Model(inputs=inputs, outputs=[strategy_output, values_output])
+
+        print('--- CFVN shape sanity ---')
+        print('num_actions (arg):', num_actions)
+        print('self.num_actions :', self.num_actions)
+
+        # Find the strategy head Dense and Reshape
+        dense_units = None
+        reshape_target = None
+        for lyr in self.network.layers:
+            if isinstance(lyr, tf.keras.layers.Dense):
+                dense_units = lyr.units  # last assignment ends up last Dense; or name layers
+            if isinstance(lyr, tf.keras.layers.Reshape):
+                reshape_target = lyr.target_shape
+
+        print('final Dense units:', dense_units)
+        print('strategy Reshape target:', reshape_target)
+        self.network.summary()
+
 
         #
         # This is a queue of querries to be fully solved using GT-CFR
@@ -766,7 +784,7 @@ class CounterfactualValueNetwork:
     #
     # Note: the input should come from the to_vect() function.
     #
-        #
+    #
     # Run inference
     #
     # Given a batch of input vectors encoding game states and
@@ -777,32 +795,36 @@ class CounterfactualValueNetwork:
     #
     # Note: the input should come from the to_vect() function.
     #
-    def query(self, input : tf.Tensor) -> tuple[tf.Tensor]:
+    @tf.function(jit_compile=True)
+    def query(self, inputs : tf.Tensor) -> tuple[tf.Tensor]:
+        """ Removing checks
         #
         # Verify that the input vector matches the dimensions of the network
         #
         assert len(input.shape) == 2, "CFVN expects a 2d input (batch size, input vector dim)"
         assert input.shape[1] == self.input_dim, "Unexpected input dimension"
+        """
         #
         # Run inference
         #
-        tf_strategy, tf_values =  self.network(input)
+        strategies, values =  self.network(inputs)
         #
         # Post-processing
         #
-        # Convert back to numpy
-        strategy = tf_strategy.numpy()
-        values = tf_values.numpy()
         # Normalize strategy
-        sums = strategy.sum(axis=0, keepdims=0)
-        strategy /= sums
+        sums = tf.reduce_sum(strategies, axis=1, keepdims=False)
+        sums = tf.where(sums == 0, tf.ones_like(sums), sums)
+        strategies = strategies / sums[:, tf.newaxis, :]
         # Zero hands with invalid cards
-        public_card_idxs = np.where(input[0, :52] == 1)[0]
-        for card in public_card_idxs:
-            strategy[:, :, get_card_coors(card)] = 0
-            values[:, :, get_card_coors(card)] = 0
-        return strategy, values
-
+        public_card_mask = tf.cast(inputs[:, :52] > 0, tf.bool) # [B, 52]
+        invalid_hands_any = tf.reduce_any(
+            public_card_mask[:, :, None] & invalid_hands[None, :, :],
+            axis=1
+        ) # [B, 1326]
+        mask = tf.cast(~invalid_hands_any, strategies.dtype)
+        strategies = strategies * mask[:, None, :] # [B, A, 1326]
+        values = values * mask[:, None, :]         # [B, P, 1326]
+        return strategies, values
 
 
     #

@@ -49,7 +49,17 @@ def get_card_coors(card: int) -> list[int]:
     assert 0 <= card < 52, f"Invalid card id: {card}"
     return get_col_coors(card) + get_row_coors(card)
 
-
+#
+# Invalid hand matrix
+#
+#    - Matrix of size = (# of cards, # of hands)
+#
+#    - invalid_hands[i, j] = whether hand j contains card i
+#
+invalid_hands = np.zeros((52, 1326), dtype=np.bool_)
+for i in range(52):
+    invalid_hands[i, get_card_coors(i)] = True
+invalid_hands = tf.constant(invalid_hands)
 
 #
 # | ---------------------------------------------- |
