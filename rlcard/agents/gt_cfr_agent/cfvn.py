@@ -140,9 +140,10 @@ class CounterfactualValueNetwork:
         # Compute the input dimension
         # according to the given number of players in the game
         #
-        self.num_players = num_players
-        self.num_actions = num_actions
-        self.input_dim = (2*self.num_players + 53) + (1326*self.num_players) # See to_vect()
+        self.N_PLAYERS = num_players
+        self.N_ACTIONS = num_actions
+        self.N_HANDS = 1326
+        self.INPUT_DIM = (2*self.N_PLAYERS + 53) + (self.N_HANDS*self.N_PLAYERS) # See to_vect()
 
         #
         # Set the data type for the model's inputs/outputs
@@ -163,40 +164,53 @@ class CounterfactualValueNetwork:
         #
         # Input layer
         #
-        inputs = Input(shape=(self.input_dim,))
+        inputs = tf.keras.layers.Input(shape=(self.INPUT_DIM,))
         #
         # Add hidden layers
         #
         layer = inputs
         for _ in range(num_layers):
-            layer = Dense(num_neurons_per_layer, activation=activation_func)(layer)
+            layer = tf.keras.layers.Dense(num_neurons_per_layer, activation=activation_func)(layer)
         #
         # Strategy output, (num_actions, 1326)
         #
         # NOTE - I think 'softmax' is the activation we want here because it yeilds
         #        normalized probability estimates.
         #
-        #        A: Using a custom 'normalize_columns' output layer
-        #
-        strategy_output = tf.keras.layers.Dense(num_actions * 1326, activation='linear')(layer)
-        strategy_output = tf.keras.layers.Reshape((num_actions, 1326))(strategy_output)
-        strategy_output = tf.keras.layers.Softmax(axis=1)(strategy_output)
-        #strategy_output = tf.keras.layers.Lambda(normalize_columns)(strategy_output)
+        strategy_output = tf.keras.layers.Dense(
+            self.N_ACTIONS * self.N_HANDS, 
+            activation='linear',
+            name="strategy_dense"
+        )(layer)
+        
+        strategy_output = tf.keras.layers.Reshape(
+            (self.N_ACTIONS, self.N_HANDS),
+            name="strategy_reshape"
+        )(strategy_output)
+        
+        strategy_output = tf.keras.layers.Softmax(
+            axis=1,
+            name="strategy_softmax"
+        )(strategy_output)
         #
         # Values output, (num_players, 1326)
         #
         # NOTE - Is there a better activation than 'linear'?
         #
-        values_output = Dense(num_players * 1326, activation='linear')(layer)
-        values_output = tf.keras.layers.Reshape((num_players, 1326))(values_output)
+        values_output = tf.keras.layers.Dense(
+            self.N_PLAYERS * self.N_HANDS, 
+            activation='linear',
+            name="values_dense"
+        )(layer)
+
+        values_output = tf.keras.layers.Reshape(
+            (self.N_PLAYERS, self.N_HANDS),
+            name="values_reshape"
+        )(values_output)
         #
         # Putting it all together into a model object
         #
-        self.network = Model(inputs=inputs, outputs=[strategy_output, values_output])
-
-        print('--- CFVN shape sanity ---')
-        print('num_actions (arg):', num_actions)
-        print('self.num_actions :', self.num_actions)
+        self.network = tf.keras.Model(inputs=inputs, outputs=[strategy_output, values_output])
 
         # Find the strategy head Dense and Reshape
         dense_units = None
@@ -206,11 +220,6 @@ class CounterfactualValueNetwork:
                 dense_units = lyr.units  # last assignment ends up last Dense; or name layers
             if isinstance(lyr, tf.keras.layers.Reshape):
                 reshape_target = lyr.target_shape
-
-        print('final Dense units:', dense_units)
-        print('strategy Reshape target:', reshape_target)
-        self.network.summary()
-
 
         #
         # This is a queue of querries to be fully solved using GT-CFR
@@ -757,7 +766,7 @@ class CounterfactualValueNetwork:
     # Note: These are the features used in the literature. Other features could be
     #       explored in the future.
     #
-    def to_vect(self, game : NolimitholdemGame, ranges : np.ndarray, chance_actor : bool=False):
+    def to_vect(self, game : NolimitholdemGame, ranges : np.ndarray, chance_actor : bool=False) -> np.ndarray:
         #
         # --> Get feature vector prefix
         #
@@ -765,13 +774,15 @@ class CounterfactualValueNetwork:
         #
         # --> Featurize player ranges
         #
-        assert self.num_players == game.num_players, "Game state and network num players mismatch"
+        assert self.N_PLAYERS == game.num_players, "Game state and network num players mismatch"
         assert ranges.shape == (self.num_players, 1326), "Unrecognized player range shape"
         range_vect = ranges.ravel() # flatten
         #
         # --> Concat the game and range features into a single feature vector
         #
-        return np.concatenate([prefix, range_vect])
+        res = np.concatenate([prefix, range_vect])
+        assert res.shape == (self.INPUT_DIM,)
+        return res
 
     #
     # Run inference
@@ -795,7 +806,10 @@ class CounterfactualValueNetwork:
     #
     # Note: the input should come from the to_vect() function.
     #
-    @tf.function(jit_compile=True)
+    @tf.function(
+        jit_compile=True,
+        input_signature=[tf.TensorSpec(shape=[None, 2709], dtype=tf.float32)] # NOTE - Manually setting input dim, should change this later
+    )
     def query(self, inputs : tf.Tensor) -> tuple[tf.Tensor]:
         """ Removing checks
         #

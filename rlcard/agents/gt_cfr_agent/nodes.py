@@ -28,7 +28,7 @@ import treys
 # Internal imports
 from rlcard.games.base import Card
 from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork
-from rlcard.agents.gt_cfr_agent.utils import random_strategy, get_1d_coor, get_card_coors, starting_hand_values
+from rlcard.agents.gt_cfr_agent.utils import random_strategy, starting_hand_values, invalid_hands
 from rlcard.games.limitholdem import PlayerStatus
 from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
 from rlcard.games.nolimitholdem.round import Action
@@ -178,7 +178,7 @@ class CFRTree:
         #
         #    - Matrix size = (Approx. # of decision nodes * # of actions, # of hands)
         #
-        #    - strategies[strat_idxs[i], j, k] 
+        #    - strategies[strat_idxs[i, j], k] 
         #         = prob. of player at node i selecting action j with hand k
         #
         self.strategies = None
@@ -187,7 +187,7 @@ class CFRTree:
         #
         #    - Matrix size = (Approx. # of decision nodes * # of actions, # of hands)
         # 
-        #    - regrets[strat_idxs[i], j, k]
+        #    - regrets[strat_idxs[i, j], k]
         #          = regret of player at node i selecting action j with hand k 
         #
         self.regrets = None
@@ -359,6 +359,11 @@ class CFRTree:
         #
         self.all_actions = [action.value for action in game_state.get_all_actions()]
         #
+        # Set the idxs of the public cards
+        #
+        root_pub_cards = tf.constant([card.to_int() for card in game_state.public_cards], dtype=tf.int32)
+        self.public_card_mask = tf.reduce_any(tf.gather(invalid_hands, root_pub_cards), axis=0)
+        #
         # Set internal tensors
         #
         self.tree = tf.constant([[-1]], dtype=tf.int32) # nodes are never descendants of themselves
@@ -514,7 +519,7 @@ class CFRTree:
             if board_str in self.board_to_idx: # Cache hit
                 self.payoffs_idxs = tf.concat([self.payoffs_idxs, [self.board_to_idx[board_str]]], axis=0)
             else: # Cache miss
-                payoff_matrix = tf.expand_dims(compute_payoff_matrix(child_game), axis=0) # TODO: compute payoffs w/ tensorflow
+                payoff_matrix = tf.cast(tf.expand_dims(compute_payoff_matrix(child_game), axis=0), tf.float32) # TODO: compute payoffs w/ tensorflow
                 if self.payoffs:
                     self.payoffs = tf.concat([self.payoffs, payoff_matrix], axis=0)
                 else:
@@ -565,11 +570,8 @@ class CFRTree:
     #
     # NOTE - implement this function for >2 player games, shouldn't be too hard
     #
+    @tf.function(jit_compile=True)
     def update_gadget_regrets(self):
-
-        # Game state for the root
-        root_game = self.game_states[0]
-
         #
         # Compute the gadget strategy using the gadget regrets
         #
@@ -582,12 +584,11 @@ class CFRTree:
         # Note 2: Let, self.gadget_regret[0] be the Follow    action regrets
         #         and, self.gadget_regret[1] be the Terminate action regrets
         #
-        gadget_regrets_positives = np.maximum(self.gadget_regrets, 0) # Should already be non-negative
-
-        denom = gadget_regrets_positives[0] + gadget_regrets_positives[1]
-        safe_denom = np.where(denom == 0, 1, denom) # remove zeros from denom to avoid dividing by zero
-        gadget_follow_strat = np.where(denom == 0, 0.5, gadget_regrets_positives[0] / safe_denom)
-
+        pos0 = tf.maximum(self.gadget_regrets[0], 0.0)
+        pos1 = tf.maximum(self.gadget_regrets[1], 0.0)
+        denom = pos0 + pos1
+        probs = tf.math.divide_no_nan(pos0, denom)
+        gadget_follow_strat = tf.where(denom == 0.0, 0.5, probs)
         #
         # In the above line, we assign 50-50 probability to hands with zero in the denominator.
         # This works for valid hands, but has the side effect of giving invalid hands non-zero
@@ -595,9 +596,8 @@ class CFRTree:
         #
         # Mask out invalid hands
         #
-        for card in root_game.public_cards:
-            gadget_follow_strat[get_card_coors(card.to_int())] = 0
-
+        gadget_follow_strat = tf.where(self.public_card_mask, 0.0, gadget_follow_strat)
+        gadget_follow_strat = tf.math.divide_no_nan(gadget_follow_strat, tf.reduce_sum(gadget_follow_strat))
         #
         # Set the opponent's range in the cfr root node to the gadget's follow strategy 
         #
@@ -627,20 +627,20 @@ class CFRTree:
         #          Un-normalized = prob opp. player reaches the root state given they have the hand (i, j)
         #          Normalized    = prob opp. player reaches the root state and has the hand (i, j)
         #
-        opp_pid = (self.players[0] + 1) % 2
-        if np.sum(gadget_follow_strat) != 0:
-            self.ranges[self.range_map[0, opp_pid], :] = gadget_follow_strat / np.sum(gadget_follow_strat)
-        else:
-            self.ranges[self.range_map[0, opp_pid], :] = gadget_follow_strat # ALL ZEROS
-
+        opp_pid = tf.cast((self.players[0] + 1) % 2, tf.int32)
+        range_id = tf.cast(self.range_map[0, opp_pid], tf.int32)
+        self.ranges.scatter_nd_update(
+            indices=tf.reshape(range_id, [1, 1]), 
+            updates=tf.reshape(gadget_follow_strat, [1, -1])
+        )
         #
         # Compute the updated gadget values
         #
         # This is a standard expected value computation.
         #
-        new_gadget_values = (gadget_follow_strat * self.values[0, opp_pid, :] + 
-                             (1 - gadget_follow_strat) * self.terminate_values)
-
+        opp_vals = self.values[0, opp_pid, :]
+        new_gadget_values = (gadget_follow_strat * opp_vals + 
+                             (1.0 - gadget_follow_strat) * self.terminate_values)
         #
         # Update the gadget regrets
         #
@@ -656,9 +656,10 @@ class CFRTree:
         #    - Always selecting Follow    yields a fixed payoff equal to the opp. cfr values at the root node
         #    - Always selecting Terminate yields a fixed payoff equal to the terminate values
         #
-        self.gadget_regrets[0] = np.maximum(self.gadget_regrets[0] + self.values[0, opp_pid, :] - new_gadget_values, 0) # gadget value @ t
-        self.gadget_regrets[1] = np.maximum(self.gadget_regrets[1] + self.terminate_values - self.gadget_values, 0)    # gadget value @ t + 1
-
+        follow_regrets = tf.maximum(self.gadget_regrets[0] + opp_vals - new_gadget_values, 0.0)
+        term_regrets = tf.maximum(self.gadget_regrets[1] + self.terminate_values - self.gadget_values, 0.0)
+        self.gadget_regrets[0].assign(follow_regrets)
+        self.gadget_regrets[1].assign(term_regrets)
         #
         # Update the gadget values to the new values
         #
@@ -779,7 +780,6 @@ class CFRTree:
     """
     @tf.function(jit_compile=True)
     def update_values_w_cfvn(self):
-        """
         # Get the batch of featurized game states
         inactive_nodes = tf.cast(tf.where((self.node_types == 0) & (~self.active_nodes))[:, 0], tf.int32) # non-active decision nodes
         N = tf.shape(inactive_nodes)[0]
@@ -793,21 +793,8 @@ class CFRTree:
             ], 
             axis=1
         )
-        """
-        # Get the batch of featurized game states
-        inactive_nodes = tf.cast(tf.where((self.node_types == 0) & (~self.active_nodes))[:, 0], tf.int32) # non-active decision nodes
-        batch_vects = tf.concat(
-            [
-                tf.gather(self.feat_vect_prefixs, tf.gather(self.vect_idxs, inactive_nodes)),  # vector prefixs
-                tf.reshape(                                                                    # player ranges
-                    tf.gather(self.ranges, tf.gather(self.range_map, inactive_nodes)),
-                    [tf.shape(inactive_nodes)[0], -1]
-                )
-            ],
-            axis=1
-        )
         # Query the cfvn
-        strats, vals = self.cfvn.query(batch_vects)
+        strats, vals = self.cfvn.query(vects)
         # Update strategies
         legal_mask = tf.gather(self.legal_actions, inactive_nodes)
         na_pairs = tf.cast(tf.where(legal_mask), tf.int32)
@@ -826,8 +813,73 @@ class CFRTree:
             updates=vals
         )
 
+    @tf.function(jit_compile=True)
     def update_values(self):
-        pass
+        for node in tf.range(self.n_nodes-1, -1, -1):
+            #
+            # Active decision node
+            #
+            if self.node_types[node] == 0 and self.active_nodes[node]: 
+                player = self.players[node]
+                row = self.tree[node]
+                children = tf.cast(tf.where(row != -1)[:, 0], dtype=tf.int32)
+                actions = tf.gather(row, children)
+                # Update player values
+                node_strat_idxs = tf.gather(self.strat_idxs[node, :], actions)
+                strats = tf.gather(self.strategies, node_strat_idxs)
+                child_values = tf.gather(self.values[:, player, :], children)
+                my_values = tf.einsum('ai,ai->i', strats, child_values)
+                # Update opponent values
+                opponent = (player + 1) % 2
+                opp_values = tf.reduce_sum(
+                    tf.gather(self.values[:, opponent, :], children),
+                    axis=0
+                )
+                self.values.scatter_nd_update(
+                    indices=tf.stack([tf.stack([node, player]), tf.stack([node, opponent])]),
+                    updates=tf.stack([my_values, opp_values], axis=0)
+                )
+                # Update regrets
+                old_regrets = tf.gather(self.regrets, node_strat_idxs)
+                new_regrets = tf.maximum(old_regrets + child_values - my_values, 0.0)
+                self.regrets.scatter_nd_update(tf.expand_dims(node_strat_idxs, 1), new_regrets)
+                # Update strategy
+                regret_sum = tf.reduce_sum(new_regrets, axis=0, keepdims=True)
+                probs = tf.math.divide_no_nan(new_regrets, regret_sum)
+                N_ACTIONS = tf.cast(tf.shape(actions)[0], tf.float32)
+                zero_cols = tf.equal(regret_sum, 0.0)
+                uniform = tf.fill(tf.shape(new_regrets), 1.0 / N_ACTIONS)
+                updated_strats = tf.where(zero_cols, uniform, probs)
+                self.strategies.scatter_nd_update(tf.expand_dims(node_strat_idxs, 1), updated_strats)
+                # TODO - Add cummulative strategy update here
+            #
+            # Non-showdown terminal node
+            #
+            elif self.node_types[node] == 1:
+                #payout = np.array(self.game_states[node].get_payoffs())
+                payout = np.array([100, -100]) # TODO - THIS IS WRONG, TEMP!!!
+                player_values = payout * tf.reduce_sum(tf.gather(self.ranges, self.range_map[node, :]), axis=1)
+                tile = tf.broadcast_to(player_values[:, tf.newaxis], [2, 1326])
+                self.values.scatter_nd_update(indices=[[node]], updates=[tile])
+            #
+            # Showdown terminal node
+            #
+            elif self.node_types[node] == 2:
+                #
+                # self.payoffs[node, 0, :, :]
+                #    = (1326, 1326) matrix
+                #
+                # self.ranges[node, 1, :][np.newaxis, :]
+                #    = (1, 1326) matrix
+                #
+                # We multiply each row of the payoff matrix by the range vector,
+                # then sum each row to get a (1326,) result
+                #
+                pot = self.pots[node]
+                P = self.payoffs[self.payoffs_idxs[node], :, :, :]   # (2, 1326, 1326)
+                R = tf.gather(self.ranges, self.range_map[node, :])  # (2, 1326)
+                vals = 0.5 * pot * tf.einsum('pij,pj->pi', P, R)     # (P, I, J) * (P, J) -> (P, J) = (2, 1326)
+                self.values.scatter_nd_update(indices=[[node]], updates=[vals])
 
     #
     # One iteration of CFR
@@ -837,141 +889,33 @@ class CFRTree:
     #
     # TODO - Implement returning querries
     #
-    def cfr_update(self) -> list[np.ndarray]:
-        #
-        # Downward pass - propagate range probabilities
-        #
-        #strt = time.time()
-        self.update_ranges()
-        #print(f'update_ranges {time.time() - strt} s')
-        #
-        # Update non-active decision node values with the cfvn
-        #
-        #strt = time.time()
-        self.update_values_w_cfvn()
-        print('NOT IMPLEMENTED!!!')
-        import ipdb; ipdb.set_trace()
-        #print(f'update_values_w_cfvn {time.time() - strt} s')
-        #
-        # Upward pass - bubble up expected values
-        #
-        #strt = time.time()
-        self.update_values()
-        #print(f'update_values {time.time() - strt} s')
-        # Update gadget game regrets
-        #strt = time.time()
-        self.update_gadget_regrets()
-        #print(f'update_gadget_regrets {time.time() - strt} s')
+    @tf.function(jit_compile=True)
+    def cfr_update(self, n_iters: int):
+        for _ in tf.range(n_iters):
+            #
+            # Downward pass - propagate range probabilities
+            #
+            #strt = time.time()
+            self.update_ranges()
+            #print(f'update_ranges {time.time() - strt} s')
+            #
+            # Update non-active decision node values with the cfvn
+            #
+            #strt = time.time()
+            self.update_values_w_cfvn()
+            #print(f'update_values_w_cfvn {time.time() - strt} s')
+            #
+            # Upward pass - bubble up expected values
+            #
+            #strt = time.time()
+            self.update_values()
+            #print(f'update_values {time.time() - strt} s')
+            # Update gadget game regrets
+            #strt = time.time()
+            self.update_gadget_regrets()
+            #print(f'update_gadget_regrets {time.time() - strt} s')
         # Return a list of querries that were made to the cfvn
-        return [] # NOTE - Not implemented
-    
-
-
-#####################################
-#                                   #
-#       TensorFlow Functions        #
-#                                   #
-##################################### 
-
-#tf.function()
-def tf_update_ranges(n_nodes, tree, players, range_map, ranges, strat_idxs, strategies):
-    pass
-
-
-
-#@tf.function()
-def jit_update_values(n_nodes, tree, node_types, players, active_nodes,
-                      range_map, ranges, strat_idxs, strategies, values,
-                      regrets, pots, payoffs_idxs, payoffs):
-    
-    for node in range(n_nodes - 1, -1, -1):
-        
-        if node_types[node] == 0 and active_nodes[node]:
-            player = players[node]
-            opponent = (player + 1) % 2
-
-            row = tree[node]
-            valid_idx_count = 0
-            for i in range(row.shape[0]):
-                if row[i] != -1:
-                    valid_idx_count += 1
-
-            actions = np.empty(valid_idx_count, dtype=np.int64)
-            children = np.empty(valid_idx_count, dtype=np.int64)
-            action_idxs = np.empty(valid_idx_count, dtype=np.int64)
-
-            idx = 0
-            for i in range(row.shape[0]):
-                if row[i] != -1:
-                    a = row[i]
-                    actions[idx] = a
-                    children[idx] = i
-                    action_idxs[idx] = strat_idxs[player, a]
-                    idx += 1
-
-            # Player update: values[node, player, :]
-            for h in range(1326):
-                s = 0.0
-                for a in range(valid_idx_count):
-                    s += strategies[action_idxs[a], h] * values[children[a], player, h]
-                values[node, player, h] = s
-
-            # Opponent update: values[node, opponent, :]
-            for h in range(1326):
-                s = 0.0
-                for a in range(valid_idx_count):
-                    s += values[children[a], opponent, h]
-                values[node, opponent, h] = s
-
-            # Regret update
-            for a in range(valid_idx_count):
-                idx = action_idxs[a]
-                for h in range(1326):
-                    r = regrets[idx, h] + values[children[a], player, h] - values[node, opponent, h]
-                    regrets[idx, h] = max(r, 0.0)
-
-            # Strategy update
-            regret_sum = np.zeros(1326)
-            for a in range(valid_idx_count):
-                idx = action_idxs[a]
-                for h in range(1326):
-                    regret_sum[h] += regrets[idx, h]
-
-            for a in range(valid_idx_count):
-                idx = action_idxs[a]
-                for h in range(1326):
-                    if regret_sum[h] == 0:
-                        strategies[idx, h] = 1.0 / valid_idx_count
-                    else:
-                        strategies[idx, h] = regrets[idx, h] / regret_sum[h]
-
-        elif node_types[node] == 1:
-            # TEMP payout
-            payout = np.array([100.0, -100.0])
-            for p in range(2):
-                r_sum = 0.0
-                for h in range(1326):
-                    r_sum += ranges[range_map[node, p], h]
-                for h in range(1326):
-                    values[node, p, h] = payout[p] * r_sum
-
-        elif node_types[node] == 2:
-            pot = pots[node]
-            payoff_idx = payoffs_idxs[node]
-
-            # Player 0
-            for i in range(1326):
-                s = 0.0
-                for j in range(1326):
-                    s += payoffs[payoff_idx, 0, i, j] * ranges[range_map[node, 1], j]
-                values[node, 0, i] = 0.5 * pot * s
-
-            # Player 1
-            for i in range(1326):
-                s = 0.0
-                for j in range(1326):
-                    s += payoffs[payoff_idx, 1, i, j] * ranges[range_map[node, 0], j]
-                values[node, 1, i] = 0.5 * pot * s
+        return # NOTE - Not implemented
 
 
 

@@ -369,6 +369,7 @@ class GTCFRSolver():
     def cfr(self, train=False) -> None:
         import time
         strt = time.time()
+        """
         #
         # Run for a fixed number of value updates on the tree.
         #
@@ -389,8 +390,10 @@ class GTCFRSolver():
                     if random.random() < self.prob_query_solve:
                             added += 1
                             self.cfvn.add_to_query_queue(q)
+        """
+        self.tree.cfr_update(math.ceil(1/self.n_expansions_per_regret_updates))
         print(f'CFR: {time.time() - strt}')
-        print(f'Got {got} total querries, added {added}')
+        #print(f'Got {got} total querries, added {added}')
 
     #
     # Add a node to the game tree
