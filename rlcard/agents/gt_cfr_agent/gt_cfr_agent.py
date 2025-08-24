@@ -11,7 +11,7 @@ import time
 from typing import TYPE_CHECKING
 
 # Internal imports
-from rlcard.agents.gt_cfr_agent.nodes import CFRNode, DecisionNode, ChanceNode, CFRTree
+from rlcard.agents.gt_cfr_agent.nodes import CFRTree
 from rlcard.agents.gt_cfr_agent.utils import uniform_range, random_range, get_card_coors
 from rlcard.envs.nolimitholdem import NolimitholdemEnv
 from rlcard.games.nolimitholdem.game import NolimitholdemGame
@@ -45,12 +45,10 @@ class GTCFRSolver():
         ):
         # Import at runtime
         from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork
-        
         #
         # Wheter to fully solve the game tree or not
         #
         self.full_solve = full_solve
-
         #
         # Initialize the counterfactual value model, if one is not given.
         #
@@ -302,24 +300,14 @@ class GTCFRSolver():
         # Error case - Unrecognized initialization input configuration
         #
         else:
-            raise ValueError("Input values for initialization not recognized")        
-        #
-        # Save the player's id in the game tree
-        #
-        CFRNode.set_root_pid = input_game.game_pointer
-        #
-        # Store a reference to the CFVN in the game tree
-        #
-        CFRNode.set_cfvn(self.cfvn)
+            raise ValueError("Input values for initialization not recognized")    
         #
         # If we are solving the full game tree, then activate all nodes in the tree.
         #
         if self.full_solve:
-            """TODO: Not Implemented"""
-            assert(False)
-            self.root.activate_full_tree()
+            self.tree.activate_full_tree()
             self.full_tree = True # The tree is now full
-            self.decision_point = self.root
+            self.decision_point = 0
         else:
             #
             # Activate the root node
@@ -558,7 +546,7 @@ class GTCFRSolver():
         # Return the computed strategies and values for the root node
         #
         print(f'Solve time: {time.time() - start}')
-        return np.copy(self.decision_point.cummulative_strategy()), np.copy(self.decision_point.values)   
+        return self.tree.get_strategy(self.decision_point), self.tree.get_values(self.decision_point)   
     
     #
     # Reset
@@ -577,7 +565,14 @@ class GTCFRAgent():
     #
     # Implement Growing Tree Counter Factual Regret (GT-CFR) algorithm
     #
-    def __init__(self, env: NolimitholdemEnv, full_solve: bool =False, prob_query_solve: int =0.9, n_expansions: int =10, n_expansions_per_regret_update: float =0.01, n_trainers: int =1, n_query_solvers: int=1):
+    def __init__(self, env: NolimitholdemEnv, 
+                       full_solve: bool =False, 
+                       prob_query_solve: int =0.9, 
+                       n_expansions: int =10, 
+                       n_expansions_per_regret_update: float =0.01, 
+                       n_trainers: int =1, 
+                       n_query_solvers: int=1
+    ):
         #
         # Poker environment
         #

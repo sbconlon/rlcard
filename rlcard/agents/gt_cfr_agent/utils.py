@@ -4,6 +4,7 @@ from itertools import combinations, permutations
 import numpy as np
 from pathlib import Path
 import tensorflow as tf
+import treys
 
 # Internal imports
 from rlcard.games.base import Card
@@ -48,6 +49,13 @@ def get_row_coors(r: int) -> list[int]:
 def get_card_coors(card: int) -> list[int]:
     assert 0 <= card < 52, f"Invalid card id: {card}"
     return get_col_coors(card) + get_row_coors(card)
+
+#
+# Returns the 2d indicies for the given 1d index
+#
+def get_2d_coors(hand: int) -> tuple[int]:
+    card1, card2 = np.triu_indices(52, k=1)
+    return card1[hand], card2[hand]
 
 #
 # Invalid hand matrix
@@ -259,3 +267,24 @@ def normalize_columns(x, epsilon=1e-10):
     col_sums = tf.reduce_sum(x, axis=0, keepdims=True)
     col_sums = tf.where(col_sums == 0, epsilon, col_sums)  # Avoid divide-by-zero
     return tf.divide(x, col_sums)
+
+
+
+#
+# | --------------------- |
+# |                       |
+# | CFVN helper functions |
+# |                       |
+# | --------------------- | 
+#
+
+def get_hand_class(hand, public_cards):
+    i, j = get_2d_coors(hand)
+    hand = [Card(card_id=i).to_treys(), Card(card_id=j).to_treys()]
+    board = [card.to_treys() for card in public_cards]
+    if hand[0] in board or hand[1] in board:
+        return -1, 'Invalid'
+    evaluator = treys.Evaluator()
+    score = evaluator.evaluate(board, hand)
+    clss = evaluator.get_rank_class(score)
+    return clss, evaluator.class_to_string(clss)

@@ -15,15 +15,22 @@ class Card:
     valid_suit = ['S', 'H', 'D', 'C', 'BJ', 'RJ']
     valid_rank = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
 
-    def __init__(self, suit, rank):
+    def __init__(self, suit: str='', rank: str='', card_id: int=None):
         ''' Initialize the suit and rank of a card
 
         Args:
             suit: string, suit of the card, should be one of valid_suit
             rank: string, rank of the card, should be one of valid_rank
         '''
-        self.suit = suit
-        self.rank = rank
+        if card_id is None:
+            assert suit in Card.valid_suit, f'Invalid suit: {suit}'
+            assert rank in Card.valid_rank, f'Invalid rank: {rank}'
+            self.suit = suit
+            self.rank = rank
+        else:
+            assert 0 <= card_id < 52, f'Invalid card id: {card_id}' # Not counting jokers here
+            self.suit = Card.valid_suit[card_id // 13]
+            self.rank = Card.valid_rank[card_id % 13]
 
     def __eq__(self, other):
         if isinstance(other, Card):
