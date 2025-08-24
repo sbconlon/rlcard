@@ -212,7 +212,7 @@ class CFRTree:
         #
         #        Otherwise, -1.
         #
-        self.vect_idxs = tf.constant([], dtype=tf.int32, shape=(0,))
+        self.vect_idxs = None
         #
         # Vectorized decision node prefixs (contain all non-range elements)
         #
@@ -220,7 +220,7 @@ class CFRTree:
         #
         #    - feat_vect_prefixs[vector_idxs[i]] = feature vector prefix for node i
         #
-        self.feat_vect_prefixs = tf.constant([], dtype=tf.float32, shape=(0, 56))
+        self.feat_vect_prefixs = None
         #
         # Non-showdown winner
         #
@@ -271,7 +271,15 @@ class CFRTree:
         #   - payoffs[payoffs_idxs[i], j, k]
         #       = payoff to the player at node i holding hand j against hand k
         #
-        self.payoffs = None    
+        self.payoffs = None
+        #
+        # Visits
+        #
+        #   - Vector of size = # of nodes
+        #
+        #   - visits[i] = # of times node i has been visited during growth
+        # 
+        self.visits = None
 
 
 
@@ -433,6 +441,7 @@ class CFRTree:
             root_strat_idxs[action] = idx
         self.strat_idxs = tf.constant([root_strat_idxs], dtype=tf.int32)
         self.payoffs_idxs = tf.constant([-1], dtype=np.int32)
+        self.visits = tf.constant([0], dtype=tf.int32)
         #
         # Increment node count
         #
@@ -582,6 +591,10 @@ class CFRTree:
         else: # Non-terminal node
             self.non_showdown_winner = tf.concat([self.non_showdown_winner, tf.constant([-1], dtype=tf.int32)], axis=0)
             self.payoffs_idxs = tf.concat([self.payoffs_idxs, tf.constant([-1], dtype=tf.int32)], axis=0)
+        #
+        # Add visits
+        #
+        self.visits = tf.concat([self.visits, tf.constant([0], dtype=tf.int32)], axis=0)
         #
         # Update node count
         #
@@ -896,29 +909,19 @@ class CFRTree:
     #
     @tf.function(jit_compile=True)
     def cfr_update_w_cfvn(self, n_iters: int):
+        acc = tf.zeros_like(self.strategies)
         for _ in tf.range(n_iters):
-            #
             # Downward pass - propagate range probabilities
-            #
-            #strt = time.time()
             self.update_ranges()
-            #print(f'update_ranges {time.time() - strt} s')
-            #
             # Update non-active decision node values with the cfvn
-            #
-            #strt = time.time()
             self.update_values_w_cfvn()
-            #print(f'update_values_w_cfvn {time.time() - strt} s')
-            #
             # Upward pass - bubble up expected values
-            #
-            #strt = time.time()
             self.update_values()
-            #print(f'update_values {time.time() - strt} s')
             # Update gadget game regrets
-            #strt = time.time()
             self.update_gadget_regrets()
-            #print(f'update_gadget_regrets {time.time() - strt} s')
+            # Accumulate strategies
+            acc = acc + self.strategies
+        self.cum_strategies.assign(acc)
         # Return a list of querries that were made to the cfvn
         return # NOTE - Not implemented
     
@@ -926,18 +929,155 @@ class CFRTree:
     def cfr_update_full_tree(self, n_iters: int):
         acc = tf.zeros_like(self.strategies)
         for _ in tf.range(n_iters):
-            #self.print_tree(player=0, hand=863) # 863 = 9H QH
             # Downward pass - propagate range probabilities
-            #self.check_public_cards()
             self.update_ranges()
             # Upward pass - bubble up expected values
-            #self.check_public_cards()
             self.update_values()
             # Update gadget game regrets
-            #self.check_public_cards()
             self.update_gadget_regrets()
+            # Accumulate strategies
             acc = acc + self.strategies
-        self.cum_strategies.assign_add(acc)
+        self.cum_strategies.assign(acc)
+
+
+
+    #####################################
+    #                                   #
+    #          Grow Functions           #
+    #                                   #
+    ##################################### 
+
+    #
+    # Add a node to the game tree
+    #
+    # Which node to add is determined by sampling a hand configuration
+    # weighted by the player's ranges at the root node, then actions are 
+    # sampled down the tree until an action for which the resulting node 
+    # is not activated. Then that node is activated.
+    #
+    # Returns whether the the attempt was successful or not.
+    #     full tree = unsuccessful attempt
+    #
+    def grow(self) -> bool:
+        #
+        # --> STEP 1 - Assign hands to the players
+        #
+        #   * The acting player recieves their true hand assignemnt. 
+        #
+        #   * All other player's hand assignments are sampled at random, weighted 
+        #     by their ranges at the decision point.
+        #
+        #   Edge case - If a given decision node is so bad for an opponent that
+        #               their follow strategy is all zeros, then we can just
+        #               sample a hand at random.
+        #
+        player_hands = np.zeros((self.n_players,), dtype=np.int32)
+        valid_hands = tf.cast(~self.public_card_mask, dtype=tf.float32)
+        # Give the acting player their true hand
+        player = self.players[0] # TODO - This should be the decision point (not neccisarily the root)
+        hand = [card.to_int() for card in self.game_states[0].players[player].hand] # TODO - Use decision point and get rid of the need for the game state
+        player_hands[player] = get_1d_coor(*sorted(hand))
+        hand_mask = tf.cast(~tf.reduce_any(tf.gather(invalid_hands, hand), axis=0), dtype=tf.float32)
+        valid_hands *= hand_mask
+        # Sample the opposing player hands according to their ranges
+        for opponent in range(self.n_players):
+            # Skip the acting player
+            if opponent == player:
+                continue
+            # Get the opponent's range
+            logits = self.ranges[self.range_map[0, opponent], :] # TODO - Use decision point
+            # Handle all zeros - assign a uniform distribution
+            if tf.reduce_sum(logits) == 0.:
+                logits = valid_hands / tf.reduce_sum(valid_hands)
+            # Else, remove invalid hands
+            else:
+                logits = logits * valid_hands
+            # Set invalid hands to a very negative logit value
+            very_neg = tf.constant(-1e9, tf.float32)
+            masked_logits = tf.where(valid_hands > 0.0, logits, very_neg)
+            # Sample
+            hand = tf.random.categorical(masked_logits[tf.newaxis, :], num_samples=1)[0, 0]
+            player_hands[opponent] = hand
+            # DEBUG
+            if not valid_hands[hand]:
+                print("Invalid hand was sampled")
+                import ipdb; ipdb.set_trace()
+            # Update valid hands
+            hand_mask = tf.cast(~tf.reduce_any(tf.gather(invalid_hands, hand), axis=0), dtype=tf.float32)
+            valid_hands *= hand_mask
+        #
+        # --> STEP 2 - Activate a node
+        #
+        #   * Traverse the tree according to PUCT statistics.
+        #     See SOG paper, page 15.
+        #
+        #   * Activate the first inactive node incountered.
+        #
+        path = [0] # TODO - Use the decision point
+        order_cache = {}
+        attempted = set()
+        while path:
+            node = path[-1]
+            player = self.players[node]
+            hand = player_hands[player]
+            row = self.tree[node]
+            children = tf.reshape(tf.where(row != -1), -1)
+            actions = tf.gather(row, children)
+            # Compute a strategy weighted by PUCT scores
+            if node in order_cache:
+                action_order = order_cache[node]
+            else:
+                total_visits = tf.cast(self.visits[node], tf.float32)
+                epsilon = tf.constant(1e-5, dtype=tf.float32)
+                c_puct = tf.constant(1.0, dtype=tf.float32) # PUCT exploration parameter
+                child_values = tf.gather(self.values[:, player, hand], children)
+                child_visits = tf.cast(tf.gather(self.visits, children), tf.float32)
+                cfr_strat = tf.gather(self.cum_strategies, tf.gather(self.strat_idxs[node, :], actions))[:, hand]
+                puct_scores = child_values + c_puct * (tf.math.sqrt(epsilon+total_visits) / (1 + child_visits)) * cfr_strat
+                puct_strat = tf.nn.softmax(puct_scores)
+                strat = 0.5 * (cfr_strat + puct_strat)
+                # Determine the order of actions to attempt
+                probs = strat.numpy()
+                probs = probs / probs.sum()
+                action_order = np.random.choice(
+                    actions.numpy(), 
+                    size=tf.shape(actions)[0].numpy(),
+                    p=probs,
+                    replace=False
+                )
+                order_cache[node] = action_order
+            # Select the next node
+            exhausted = True
+            for action in action_order:
+                try:
+                    next_node = tf.where(row == action)[0, 0].numpy()
+                except:
+                    import ipdb; ipdb.set_trace()
+                # Skip if we've already attempted this node
+                if next_node in attempted:
+                    continue
+                # Skip if this node isn't a decision node
+                if self.node_types[next_node] != 0:
+                    continue
+                # SUCCESS - Activate this node if it isn't active
+                if not self.active_nodes[next_node]:
+                    path.append(next_node)
+                    idxs = tf.constant(path, dtype=tf.int32)
+                    updates = tf.gather(self.visits, path) + tf.ones(len(path), dtype=tf.int32)
+                    tf.tensor_scatter_nd_update(self.visits, idxs[:, tf.newaxis], updates)
+                    self.activate(next_node)
+                    return True
+                # Else, select this node
+                path.append(next_node)
+                exhausted = False
+                break
+            # If this node's children are exhausted, then backtrack
+            if exhausted:
+                path.pop()
+                attempted.add(node)
+            continue
+        # FAILURE - Tree is full
+        return False
 
 
 

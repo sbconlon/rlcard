@@ -235,10 +235,6 @@ class GTCFRSolver():
             # The root node is the decision node we are solving
             #
             self.trajectory_seed = []
-            """
-            # DEBUG - Activate the full game tree for debugging purpuses
-            #self.root.activate_full_tree()
-            """
         #
         # Case 2 - Existing game tree. No input player range or opponent values.
         #
@@ -382,99 +378,6 @@ class GTCFRSolver():
         self.tree.cfr_update(math.ceil(1/self.n_expansions_per_regret_updates))
         print(f'CFR: {time.time() - strt}')
         #print(f'Got {got} total querries, added {added}')
-
-    #
-    # Add a node to the game tree
-    #
-    # Which node to add is determined by sampling a hand configuration
-    # weighted by the player's ranges at the root node, then actions are 
-    # sampled down the tree until an action for which the resulting node 
-    # is not activated. Then that node is activated.
-    #
-    # If the tree is full, then set a parameter to skip growth attempts
-    # in the future.
-    #
-    def grow(self) -> None:
-        #
-        # Skip the grow attempt if the game tree is full
-        #
-        if self.full_tree:
-            return
-        #
-        # The acting player recieves their true hand assignemnt. 
-        #
-        # All other player's hand assignments are sampled at random, weighted 
-        # by their ranges at the decision point.
-        #
-        hands = [None] * self.root.game.num_players # list of player's hands
-        used_cards = {card.to_int() for card in self.decision_point.game.public_cards} # track cards that've been used by previous players
-        #
-        # Give the acting player their true hand
-        #
-        pid = self.decision_point.game.game_pointer
-        hands[pid] = tuple(card.to_int() for card in self.decision_point.game.players[pid].hand)
-        used_cards.add(hands[pid][0])
-        used_cards.add(hands[pid][1])
-        #
-        # For each opponent player...
-        #
-        for opp_pid in range(self.decision_point.game.num_players):
-            #
-            # Skip the acting player
-            #
-            if pid == opp_pid:
-                continue
-            #
-            # Get the probability the player is holing each hand
-            #
-            hand_probs = np.copy(self.decision_point.player_ranges[opp_pid])
-            
-            #
-            # If a given decision node is so bad for an opponent that
-            # they follow strategy is all zeros, then we can just
-            # sample a hand at random.
-            #
-            if np.sum(hand_probs) == 0:
-                hand_probs = np.triu(np.ones(hand_probs.shape), k=1)
-            
-            #
-            # Mask out cards that have already been taken
-            #
-            for card_idx in used_cards:
-                hand_probs[card_idx, :] = 0.
-                hand_probs[:, card_idx] = 0.
-
-            hand_probs /= hand_probs.sum()
-            """
-            # DEBUG
-            self.decision_point.check_matrix(np.array([hand_probs]))
-            """
-            #
-            # Sample a hand
-            #
-            idx = np.random.choice(hand_probs.size, p=hand_probs.flatten())
-            #
-            # Convert the 1D idx back to 2D hand, (card1, card2)
-            #
-            hand = divmod(idx, 52)
-            #
-            # Check that the hand is valid
-            #
-            assert hand[0] < hand[1], 'Ill-formatted hand selected'
-            #
-            # Add the hand to the hand list
-            #
-            hands[opp_pid] = hand
-            #
-            # Update used cards set
-            #
-            used_cards.add(hand[0])
-            used_cards.add(hand[1])
-        #
-        # Try to add a node to the subtree,
-        # using the given hand to sample a trajectory
-        #
-        self.full_tree = not self.decision_point.grow_tree(hands)
     
     #
     # Growing Tree Counterfacutal Regret
@@ -494,7 +397,9 @@ class GTCFRSolver():
             #
             # Add a new node to the game tree
             #
-            self.grow()
+            strt = time.time()
+            self.tree.grow()
+            print(f'GROW: {time.time() - strt}')
             #
             # Run cfr to update the policy and regret estimates 
             # for each state in the tree
