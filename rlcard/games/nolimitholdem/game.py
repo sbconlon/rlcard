@@ -29,7 +29,7 @@ class NolimitholdemGame(Game):
                        num_players=2, 
                        fixed_public_cards=[], 
                        fixed_player_cards={}, 
-                       starting_stage=Stage.PREFLOP,
+                       starting_stage='preflop',
                        disabled_actions=None
     ):
         """Initialize the class no limit holdem Game"""
@@ -118,8 +118,9 @@ class NolimitholdemGame(Game):
     two_card_outcome_hash = { combo: idx for idx, combo in enumerate(combinations(range(52), 2)) }
     three_card_outcome_hash = { combo: idx for idx, combo in enumerate(combinations(range(52), 3)) }
     
+    @staticmethod
     def outcome_to_int(outcome: list[Card]) -> int:
-        card_ids = tuple(card.to_int() for card in outcome)
+        card_ids = tuple(sorted(card.to_int() for card in outcome))
         if len(card_ids) == 1:
             return NolimitholdemGame.one_card_outcome_hash[card_ids]
         elif len(card_ids) == 2:
@@ -209,7 +210,7 @@ class NolimitholdemGame(Game):
         for pid in range(self.num_players):
             if pid in self.fixed_player_cards:
                 # Give the player their rigged hand
-                self.players[pid].hand = self.fixed_player_cards[pid]
+                self.players[pid].hand = sorted(self.fixed_player_cards[pid], key=lambda x: x.to_int())
             else:
                 # Else, deal a random hand
                 random_hand = sorted([self.dealer.deal_card(), self.dealer.deal_card()], key=lambda x: x.to_int())
@@ -225,12 +226,17 @@ class NolimitholdemGame(Game):
         self.public_cards = []
         
         # Big blind and small blind
-        s = (self.dealer_id + 1) % self.num_players
-        b = (self.dealer_id + 2) % self.num_players
+        if self.num_players == 2:
+            # Heads-up: the button posts the small blind and acts first preflop
+            s = self.dealer_id
+            b = (self.dealer_id + 1) % self.num_players
+        else:
+            s = (self.dealer_id + 1) % self.num_players
+            b = (self.dealer_id + 2) % self.num_players
         self.players[b].bet(chips=self.big_blind)
         self.players[s].bet(chips=self.small_blind)
 
-        # The player next to the big blind plays the first
+        # Preflop action starts to the left of the big blind
         self.game_pointer = (b + 1) % self.num_players
 
         # Initialize a bidding round, in the first round, the big blind and the small blind needs to

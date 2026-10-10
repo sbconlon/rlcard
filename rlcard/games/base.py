@@ -24,7 +24,7 @@ class Card:
         '''
         if card_id is None:
             assert suit in Card.valid_suit, f'Invalid suit: {suit}'
-            assert rank in Card.valid_rank, f'Invalid rank: {rank}'
+            assert rank in Card.valid_rank or (suit in ('BJ', 'RJ') and rank == ''), f'Invalid rank: {rank}'
             self.suit = suit
             self.rank = rank
         else:

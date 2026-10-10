@@ -35,7 +35,7 @@ class TestNolimitholdemEnv(unittest.TestCase):
 
         env.step(0)
         decoded = env._decode_action(1)
-        self.assertEqual(decoded, Action.CHECK_CALL)
+        self.assertEqual(decoded, Action.CHECK)
 
     def test_step(self):
         env = rlcard.make('no-limit-holdem')

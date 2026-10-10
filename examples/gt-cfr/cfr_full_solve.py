@@ -1,9 +1,15 @@
-# ====================== #
-#  Train a GT-CFR Agent  #
-# ====================== #
+# ================================================ #
+#  Full-tree solve of the river ground-truth spot  #
+# ================================================ #
+#
+# Default: load the saved ground truth and print the per-hand strategy and values.
+# --solve: re-solve the spot (default 10000 CFR iterations) and overwrite the files.
 
 # External imports
+import argparse
 from collections import defaultdict
+import os
+os.environ.setdefault('TF_FORCE_GPU_ALLOW_GROWTH', 'true')  # leave GPU memory for cuBLAS; must precede the TensorFlow import
 import numpy as np
 
 # Internal imports
@@ -51,23 +57,23 @@ def main():
     #
     env.reset()
     agent = GTCFRAgent(env, full_solve=True)
-    agent.solver.n_expansions_per_regret_updates = 1/10000
-    """
-    #
-    # Solve
-    #
-    agent.solver.solve(env.game)
-    #
-    # Save the results
-    #
-    strat = agent.solver.tree.get_cum_strategy(0)
-    value = agent.solver.tree.get_values(0)
-    np.save('strat-fs-7s8s8hThJh-tf.npy', strat)
-    np.save('values-fs-7s8s8hThJh-tf.npy', value)
-    print('--> Saved files')
-    """
-    strat = np.load('strat-fs-7s8s8hThJh-tf.npy')
-    value = np.load('values-fs-7s8s8hThJh-tf.npy')
+
+    args = argparse.ArgumentParser(description='Full-tree solve of the river ground-truth spot')
+    args.add_argument('--solve', action='store_true', help='re-solve and overwrite the ground-truth files')
+    args.add_argument('--iters', type=int, default=10000, help='CFR iterations for --solve')
+    args = args.parse_args()
+
+    if args.solve:
+        agent.solver.n_expansions_per_regret_updates = 1 / args.iters
+        agent.solver.solve(env.game)
+        strat = agent.solver.tree.get_cum_strategy(0)
+        value = agent.solver.tree.get_values(0).numpy()
+        np.save('strat-fs-7s8s8hThJh-tf.npy', strat)
+        np.save('values-fs-7s8s8hThJh-tf.npy', value)
+        print(f'--> Saved ground truth after {args.iters} iterations ({int(agent.solver.tree.n_nodes)} nodes)')
+    else:
+        strat = np.load('strat-fs-7s8s8hThJh-tf.npy')
+        value = np.load('values-fs-7s8s8hThJh-tf.npy')
     #
     # Print the results
     #
@@ -103,8 +109,6 @@ def main():
                 f"A {strat[1, hand]:.3f}   "
                 f"B {strat[2, hand]:.3f}   "
                 f'{bucket(hand)}')
-    
-    import ipdb; ipdb.set_trace()
 
 if __name__ == '__main__': # Needed for multiprocessing
     main()

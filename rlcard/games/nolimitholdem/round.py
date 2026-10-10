@@ -151,16 +151,16 @@ class NolimitholdemRound:
         # --> Bet Actions
         #
         elif action in bet_actions_set:
-            assert diff == 0, "Can't bet when already facing a bet"
+            assert max(self.raised) == 0, "Can't bet once chips are in the round; raise instead"
             bet_size = int(bet_actions_multipliers[action] * self.dealer.pot)
-            self.raised[self.game_pointer] = bet_size
+            self.raised[self.game_pointer] += bet_size
             player.bet(chips=bet_size)
             self.not_raise_num = 1
         #
         # --> Raise Actions
         #
         elif action in raise_actions_set:
-            assert diff != 0, "Can't raise when not facing a bet"
+            assert max(self.raised) > 0, "Can't raise when nobody has bet"
             bet_size = int(raise_actions_multipliers[action] * max(self.raised)) - self.raised[self.game_pointer]
             self.raised[self.game_pointer] += bet_size
             player.bet(chips=bet_size)
@@ -217,37 +217,42 @@ class NolimitholdemRound:
         player = players[self.game_pointer]
 
         #
-        # Get the bet size the player is facing
+        # Highest contribution this round, and what the player must add to match it
         #
-        diff = max(self.raised) - self.raised[self.game_pointer]
+        faced = max(self.raised)
+        diff = faced - self.raised[self.game_pointer]
 
         #
-        # Case 1 - No bets have been made this round
+        # Case 1 - Nobody has put chips into this round: check or open with a bet
         #
-        if (#all(r == 0 for r in self.raised) or
-            diff == 0 # Special case - the big blind can check their option to close the preflop round
-        ):
-            #
-            # Add legal default actions
+        if faced == 0:
             legal_actions.add(Action.CHECK)
             legal_actions.add(Action.ALL_IN)
-            #
-            # Add legal bet actions
             for action, multiplier in bet_actions_multipliers.items():
-                if (player.remained_chips > multiplier * self.dealer.pot): # Player has enough chips
+                if player.remained_chips > multiplier * self.dealer.pot:
                     legal_actions.add(action)
         #
-        # Case 2 - Bets have been made this round
+        # Case 2 - The player has already matched the bet (the big blind's preflop
+        #          option): check or raise. Folding is never needed here.
+        #
+        elif diff == 0:
+            legal_actions.add(Action.CHECK)
+            legal_actions.add(Action.ALL_IN)
+            for action, multiplier in raise_actions_multipliers.items():
+                raise_cost = int(multiplier * faced) - self.raised[self.game_pointer]
+                if player.remained_chips > raise_cost:
+                    legal_actions.add(action)
+        #
+        # Case 3 - Facing a bet: fold, call, or raise
         #
         else:
-            legal_actions.add(Action.FOLD)   # The player can always fold
-            legal_actions.add(Action.CALL)   # The player can always call
-            if player.remained_chips > diff: # The player can go all-in if they have enough chips
+            legal_actions.add(Action.FOLD)
+            legal_actions.add(Action.CALL)
+            if player.remained_chips > diff:
                 legal_actions.add(Action.ALL_IN)
-            #
-            # Add legal raise actions
             for action, multiplier in raise_actions_multipliers.items():
-                if (player.remained_chips > multiplier * diff): # Player has enough chips
+                raise_cost = int(multiplier * faced) - self.raised[self.game_pointer]
+                if player.remained_chips > raise_cost:
                     legal_actions.add(action)
 
         #

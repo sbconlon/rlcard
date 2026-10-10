@@ -34,6 +34,13 @@ from rlcard.games.nolimitholdem.game import NolimitholdemGame, Stage
 from rlcard.games.nolimitholdem.round import Action
 from rlcard.utils.utils import init_standard_deck
 
+# Card-removal helpers for fold terminals: hand h = (HAND_CARD1[h], HAND_CARD2[h]),
+# in the same hand order as every other 1326-vector (np.triu_indices(52, k=1)).
+INVALID_HANDS_F32 = tf.cast(invalid_hands, tf.float32)   # (52, 1326): 1 where hand j contains card c
+_hand_i, _hand_j = np.triu_indices(52, k=1)
+HAND_CARD1 = tf.constant(_hand_i, dtype=tf.int32)         # (1326,)
+HAND_CARD2 = tf.constant(_hand_j, dtype=tf.int32)         # (1326,)
+
 
 class CFRTree:
     #
@@ -673,7 +680,7 @@ class CFRTree:
         pos1 = tf.maximum(self.gadget_regrets[1], 0.0)
         denom = pos0 + pos1
         probs = tf.math.divide_no_nan(pos0, denom)
-        gadget_follow_strat = tf.where(denom == 0.0, 0.5, probs)
+        follow_prob = tf.where(denom == 0.0, 0.5, probs) # per-hand P(Follow); stays unnormalized for the gadget's own value and regrets
         #
         # In the above line, we assign 50-50 probability to hands with zero in the denominator.
         # This works for valid hands, but has the side effect of giving invalid hands non-zero
@@ -681,42 +688,49 @@ class CFRTree:
         #
         # Mask out invalid hands
         #
-        gadget_follow_strat = tf.where(self.public_card_mask, 0.0, gadget_follow_strat)
-        gadget_follow_strat = tf.math.divide_no_nan(gadget_follow_strat, tf.reduce_sum(gadget_follow_strat))
+        follow_prob = tf.where(self.public_card_mask, 0.0, follow_prob)
+        opp_range = tf.math.divide_no_nan(follow_prob, tf.reduce_sum(follow_prob)) # normalized copy: a distribution over hands, used ONLY as the range
         #
-        # Set the opponent's range in the cfr root node to the gadget's follow strategy 
+        # Set the opponent's range in the cfr root node to the gadget's follow strategy
         #
         # Reasoning:
         #     Gadget follow strat = probability of choosing to play toward the cfr root state
         #     Opp. root range = prob. of the opp. reaching this state given her strategy
         #     Therefore, gadget follow strat = opponent's range at the root node.
         #
-        # Normalize the opponent's reach probibility.
+        # Two different quantities come out of the same vector, and only one is normalized:
         #
-        # Note 1 - while this step is not included in deepstack's pseudocode,
-        #          I think it fits the reasoning of the gadget game - the initial
-        #          state of the sub game can be thought of as the start of a game
-        #          where the two player's are dealt cards from a weighted deck.
-        #          Using this reasoning, the follow strat should be normalized.
+        #     follow_prob[h] - per-hand probability that the opponent holding h chooses Follow.
+        #                      Used for the gadget's expected value and regrets below. NEVER
+        #                      normalized across hands: the gadget is a separate two-action
+        #                      game for each hand.
         #
-        # Note 2 - I came to this conclusion after noticing the expected values
-        #          blow up because we are giving a 1.0 reach probability for the
-        #          opponent for good hands and 0.0 reach probability for bad hands.
-        #          When this is propagated down to terminal nodes, it leads to
-        #          expected values greater than the total number of chips in the game.
+        #     opp_range[h]   - follow_prob normalized to sum to one over all hands, used as the
+        #                      opponent's range at the root (a distribution over hands).
         #
-        # Note 3 - I don't think multiplying all reach probabilities by a constant
-        #          will affect the output strategy.
+        # Note 1 - normalizing the range is not in DeepStack's pseudocode, but it fits the
+        #          reasoning of the gadget game: the start of the subgame can be thought of as
+        #          a game where the players are dealt cards from a weighted deck.
+        #
+        # Note 2 - without normalization the actor's values are ordinary counterfactual values
+        #          (sums over opponent hands), which are large but not wrong. With it they are
+        #          expected values conditional on the opponent's hand distribution. This is a
+        #          convention choice; every solve must use the same one so that opt-out values
+        #          carried between re-solves stay on the same scale as root values.
+        #
+        # Note 3 - multiplying all of the opponent's reach probabilities by a constant scales the
+        #          actor's counterfactual values uniformly and does not change the actor's strategy
+        #          (regret matching is scale invariant).
         #
         # Note 4 - Bayes' perspective:
-        #          Un-normalized = prob opp. player reaches the root state given they have the hand (i, j)
-        #          Normalized    = prob opp. player reaches the root state and has the hand (i, j)
+        #          Un-normalized = prob. the opponent reaches the root state given they hold hand (i, j)
+        #          Normalized    = prob. the opponent holds hand (i, j) given that they reach the root state
         #
         opp_pid = tf.cast((self.players[0] + 1) % 2, tf.int32)
         range_id = tf.cast(self.range_map[0, opp_pid], tf.int32)
         self.ranges.scatter_nd_update(
             indices=tf.reshape(range_id, [1, 1]), 
-            updates=tf.reshape(gadget_follow_strat, [1, -1])
+            updates=tf.reshape(opp_range, [1, -1])
         )
         #
         # Compute the updated gadget values
@@ -724,8 +738,8 @@ class CFRTree:
         # This is a standard expected value computation.
         #
         opp_vals = self.values[0, opp_pid, :]
-        new_gadget_values = (gadget_follow_strat * opp_vals + 
-                             (1.0 - gadget_follow_strat) * self.terminate_values)
+        new_gadget_values = (follow_prob * opp_vals + 
+                             (1.0 - follow_prob) * self.terminate_values)
         #
         # Update the gadget regrets
         #
@@ -748,7 +762,7 @@ class CFRTree:
         #
         # Update the gadget values to the new values
         #
-        self.gadget_values = new_gadget_values
+        self.gadget_values.assign(new_gadget_values) # in place: a plain rebind is not carried across compiled iterations
 
     # NOTE - We can further improve this function by applying the range updates on 
     #        a per level basis in parallel.
@@ -854,10 +868,16 @@ class CFRTree:
                 winner = self.non_showdown_winner[node]
                 loser = (winner + 1) % 2
                 profit = self.put_in_pot[node, loser]
-                range_sum = tf.reduce_sum(tf.gather(self.ranges, tf.gather(self.range_map[node], [loser, winner])), axis=1)
+                # Other player's range as seen by [winner, loser]: row 0 is the loser's, row 1 the winner's
+                other_ranges = tf.gather(self.ranges, tf.gather(self.range_map[node], [loser, winner]))   # (2, 1326)
+                # Card removal: subtract the mass of the other player's hands that share a card with h
+                card_mass  = tf.matmul(other_ranges, INVALID_HANDS_F32, transpose_b=True)                  # (2, 52)
+                blocked    = (tf.gather(card_mass, HAND_CARD1, axis=1)
+                              + tf.gather(card_mass, HAND_CARD2, axis=1) - other_ranges)                    # (2, 1326)
+                compatible = tf.reduce_sum(other_ranges, axis=1, keepdims=True) - blocked                   # (2, 1326)
                 keep_cols = tf.cast(~self.public_card_mask, dtype=tf.float32)
                 signs = tf.constant([1.0, -1.0], dtype=self.values.dtype)
-                updates = signs[:, None] * profit * range_sum[:, None] * tf.stack([keep_cols, keep_cols], axis=0)
+                updates = signs[:, None] * profit * compatible * keep_cols[None, :]
                 indices = tf.stack([tf.fill([2], node), tf.stack([winner, loser], axis=0)], axis=1)
                 self.values.scatter_nd_update(
                     indices,
