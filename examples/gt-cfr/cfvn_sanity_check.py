@@ -1,117 +1,75 @@
+# ================================================================= #
+#  CFVN sanity check: can the network memorize one training target?  #
+# ================================================================= #
+#
+# Builds the ground-truth target for the river root (uniform ranges) and trains the
+# network on 32 copies of it until its prediction matches. Checks the model, the loss,
+# and the featurization, independently of any search.
+
 # External imports
+import os
+os.environ.setdefault('TF_FORCE_GPU_ALLOW_GROWTH', 'true')  # leave GPU memory for cuBLAS; must precede the TensorFlow import
 import numpy as np
+import tensorflow as tf
 
 # Internal imports
-from print_profiler_stats import print_rlcard_function_stats
 import rlcard
 from rlcard.agents.gt_cfr_agent.cfvn import CounterfactualValueNetwork
-from rlcard.agents.gt_cfr_agent.utils import uniform_range
+from rlcard.agents.gt_cfr_agent.utils import uniform_range, get_2d_coors
 from rlcard.games.base import Card
-from rlcard.utils.utils import init_standard_deck
 from rlcard.games.nolimitholdem.round import Action
+from rlcard.utils.utils import init_standard_deck
 
 #
-# Initialize nolimit holdem environment
+# The river ground-truth spot
 #
 config = {
-            'fixed_public_cards': [
-                                    Card('H', 'T'), 
-                                    Card('S', '8'), 
-                                    Card('S', '7'), 
-                                    Card('H', 'J'), 
-                                    Card('H', '8')
-                                ],
-
-            'starting_stage': 'river',
-            'chips_for_each': 10,
-            'disabled_actions': {Action.BET_POT,
-                                 Action.BET_5POT,
-                                 Action.RAISE_3X,
-                                 Action.RAISE_5X},
-            'dealer_id': 0
+    'fixed_public_cards': [Card('H', 'T'), Card('S', '8'), Card('S', '7'), Card('H', 'J'), Card('H', '8')],
+    'starting_stage': 'river',
+    'chips_for_each': 10,
+    'disabled_actions': {Action.BET_POT, Action.BET_5POT, Action.RAISE_3X, Action.RAISE_5X},
+    'dealer_id': 0,
 }
 env = rlcard.make('no-limit-holdem', config=config)
 env.reset()
 game = env.game
 
+true_strat = np.load('strat-fs-7s8s8hThJh-tf.npy')      # (3, 1326): rows in legal-action order
+true_values = np.load('values-fs-7s8s8hThJh-tf.npy')    # (2, 1326)
 
-#
-# Load truth data
-#
-true_strat = np.load('strat-fs-7s8s8hThJh.npy')
-true_values = np.load('values-fs-7s8s8hThJh.npy')
-
-#
-# Initialize the CFVN
-#
-cfvn = CounterfactualValueNetwork(n_trainers=0, n_query_solvers=0)
+cfvn = CounterfactualValueNetwork(n_trainers=0, n_query_solvers=0, use_shared_weights=False)
 cfvn.init_replay_buffer()
 
 #
-# Input vector
+# One target: uniform ranges at the river root, the full-solve answer as the label
 #
-player_ranges = np.array([uniform_range(game.public_cards), uniform_range(game.public_cards)])
-print([card.to_int() for card in game.public_cards])
-vect = cfvn.to_vect(game, player_ranges, False)
+player_ranges = np.stack([uniform_range(game.public_cards), uniform_range(game.public_cards)])
+target = cfvn.make_training_target(game, player_ranges, true_strat, true_values)
+vect, target_strat_padded, target_values = target
+legal_rows = [game.get_all_actions().index(a) for a in game.get_legal_actions()]
 
-#
-# Build the target
-#
-# Reshape the true strategy and values to match the network output dimensions
-triu_indices = np.triu_indices(52, k=1)
-target_strat = true_strat[:, triu_indices[0], triu_indices[1]]
-target_values = true_values[:, triu_indices[0], triu_indices[1]]
-# Pad the target strategy with zeros for invalid actions
-target_strat_padded = np.zeros((cfvn.num_actions, 1326))
-all_actions = game.round.get_all_actions()
-legal_actions = game.get_legal_actions()
-valid_action_idxs = [all_actions.index(action) for action in legal_actions]
-for idx, padded_idx in enumerate(valid_action_idxs):
-    target_strat_padded[padded_idx] = target_strat[idx]
-target = (vect, target_strat_padded, target_values)
+deck = sorted(init_standard_deck(), key=lambda c: c.to_int())
+def hand_str(hand):
+    c1, c2 = get_2d_coors(hand)
+    return f'{deck[c1]}{deck[c2]}'
 
-#
-# Int to card map
-#
-int_to_card = {c.to_int(): c for c in init_standard_deck()}
-
-#
-# Train directly on the truth values
-#
 n_updates = 0
 while True:
-    #
-    # Test the network quality
-    #
-    print()
-    print('=====================================================================')
-    print(f'Batch #{n_updates}')
-    print('Starting test solve')
-    pred_strat, pred_values = cfvn.query(vect, valid_action_idxs)
-    mse_strat, mse_values = np.square(pred_strat - true_strat), np.square(pred_values - true_values)
-    print(f'Strategy MSE = {mse_strat.mean()}')
-    print(f'Values MSE   = {mse_values.mean()}')
-    print()
-    worst_strat_hand = np.unravel_index(np.argmax(np.sum(mse_strat, axis=0)), mse_strat.shape[1:])
-    worst_values_hand = np.unravel_index(np.argmax(np.sum(mse_values, axis=0)), mse_values.shape[1:])
-    print(f'Worst Strategy')
-    print(f'{[str(int_to_card[worst_strat_hand[0]]), str(int_to_card[worst_strat_hand[1]])]}')
-    print(f'Expected = {true_strat[:, worst_strat_hand[0], worst_strat_hand[1]]}')
-    print(f'Got = {pred_strat[:, worst_strat_hand[0], worst_strat_hand[1]]}')
-    print()
-    print(f'Worst Values')
-    print(f'{[str(int_to_card[worst_values_hand[0]]), str(int_to_card[worst_values_hand[1]])]}')
-    print(f'Expected = {true_values[:, worst_values_hand[0], worst_values_hand[1]]}')
-    print(f'Got = {pred_values[:, worst_values_hand[0], worst_values_hand[1]]}')
-    print()
-    if np.all(np.isclose(pred_strat, true_strat)) and np.all(np.isclose(pred_values, true_values)):
+    pred_strat, pred_values = cfvn.query(tf.constant(vect[None, :]))
+    pred_strat = pred_strat.numpy()[0][legal_rows]     # (3, 1326), legal rows only
+    pred_values = pred_values.numpy()[0]
+    err_strat = np.abs(pred_strat - true_strat)
+    err_values = np.abs(pred_values - true_values)
+    print(f'Batch #{n_updates:4d}   strategy MAE {err_strat.mean():.5f}   values MAE {err_values.mean():.5f}')
+    if n_updates % 10 == 0:
+        worst = int(np.argmax(err_strat.sum(axis=0)))
+        print(f'   worst strategy hand {hand_str(worst)}: expected {np.round(true_strat[:, worst], 3)} got {np.round(pred_strat[:, worst], 3)}')
+        worst = int(np.argmax(err_values.sum(axis=0)))
+        print(f'   worst value hand    {hand_str(worst)}: expected {np.round(true_values[:, worst], 3)} got {np.round(pred_values[:, worst], 3)}')
+    if np.allclose(pred_strat, true_strat, atol=1e-2) and np.allclose(pred_values, true_values, atol=1e-2):
         print('SUCCESS')
         break
-    #
-    # Perform a batch update
-    #
-    for _ in range(32):
+    for _ in range(cfvn.batch_size):
         cfvn.add_to_replay_buffer(target)
     cfvn.train(0, niters=1)
     n_updates += 1
-

@@ -53,12 +53,18 @@ class CFRTree:
     #    - n_players = num. of players in the game
     #
     #
-    def __init__(self, cfvn: CounterfactualValueNetwork, n_players: int=2):
+    def __init__(self, cfvn: CounterfactualValueNetwork, n_players: int=2, use_gadget: bool=True):
         #
         # Store the counterfactual value network
         #
         self.cfvn = cfvn
         self.cfvn_enabled = tf.constant(bool(self.cfvn), dtype=tf.bool)
+        #
+        # Re-solving (gadget on): the opponent's root range is produced by the gadget game.
+        # Fixed-belief solve (gadget off): both root ranges are given and stay fixed; used
+        # for query solving (paper: 'a subgame with fixed beliefs for both players').
+        #
+        self.use_gadget = bool(use_gadget)
         #
         # Store the number of players and actions
         #
@@ -287,6 +293,10 @@ class CFRTree:
         #   - visits[i] = # of times node i has been visited during growth
         # 
         self.visits = None
+        #
+        # Bind the compiled CFR functions
+        #
+        self._bind_compiled()
 
 
 
@@ -300,10 +310,32 @@ class CFRTree:
         res = tf.gather(self.strategies, self.strat_idxs[node, :]).numpy()
         return res[self.legal_actions[node], :]
     
+    #
+    # Average strategy over the solve so far (linearly weighted). Each hand's column is
+    # normalized on read, which also handles nodes that joined the search late.
+    #
     def get_cum_strategy(self, node: int) -> np.ndarray:
-        res = tf.gather(self.cum_strategies, self.strat_idxs[node, :]).numpy()
-        return res[self.legal_actions[node], :]
+        res = tf.gather(self.cum_strategies, self.strat_idxs[node, :]).numpy()[self.legal_actions[node], :]
+        sums = res.sum(axis=0, keepdims=True)
+        return np.divide(res, sums, out=np.zeros_like(res), where=sums > 0)
     
+    #
+    # Ids of the frontier: inactive decision nodes, the ones the CFVN is asked about.
+    #
+    def frontier_nodes(self) -> np.ndarray:
+        return np.where((self.node_types.numpy() == 0) & (~self.active_nodes.numpy()))[0]
+
+    #
+    # A logged CFVN query: the public state at a frontier node and both players' ranges
+    # there, exactly as the network saw them. Deep-copied so later CFR iterations and
+    # pickling to a worker process cannot touch the tree's own objects.
+    #
+    def frontier_query(self, node: int) -> tuple[NolimitholdemGame, np.ndarray]:
+        game = copy.deepcopy(self.game_states[node])
+        ranges = tf.gather(self.ranges, self.range_map[node]).numpy().copy()
+        return game, ranges
+
+
     def get_values(self, node: int) -> np.ndarray:
         return self.values[node, :, :]
 
@@ -394,7 +426,7 @@ class CFRTree:
     def init_gadget_game(self, input_opponents_values: np.ndarray =None):
         root_game = self.game_states[0]
         if input_opponents_values is not None:
-            self.terminate_values = input_opponents_values
+            self.terminate_values = tf.constant(np.asarray(input_opponents_values, dtype=np.float32)) # same type as the heuristic branch
         else:
             self.terminate_values = tf.constant(starting_hand_values(root_game) * root_game.dealer.pot, dtype=tf.float32) # = t_values = v_2 in the literature
         self.gadget_regrets = tf.Variable(tf.zeros((2, 1326), dtype=tf.float32), trainable=False) # 2 gadget actions, (Follow, Terminate)
@@ -440,6 +472,8 @@ class CFRTree:
         legal_actions = [self.all_actions.index(action.value) for action in game_state.get_legal_actions()]
         self.strategies = tf.Variable(random_strategy(len(legal_actions), game_state.public_cards), dtype=tf.float32, trainable=False)
         self.regrets = tf.Variable(np.zeros((len(legal_actions), 1326)), dtype=tf.float32, trainable=False)
+        self.cum_strategies = tf.Variable(tf.zeros_like(self.strategies), trainable=False)
+        self.cfr_iters = tf.Variable(0.0, trainable=False) # CFR iterations run on this tree so far (the linear-averaging weight)
         self.vect_idxs = tf.constant([-1], dtype=tf.int32) # Root node never inactive
         self.put_in_pot = tf.constant([p.in_chips for p in game_state.players], dtype=tf.float32)[None, :]
         self.non_showdown_winner = tf.constant([-1], dtype=tf.int32)
@@ -456,7 +490,8 @@ class CFRTree:
         #
         # Initialize gadget game
         #
-        self.init_gadget_game(opponent_values)
+        if self.use_gadget:
+            self.init_gadget_game(opponent_values)
 
     #
     # Adds a decision node to the game tree
@@ -521,7 +556,7 @@ class CFRTree:
         #
         # Note - terminal nodes are always considered active
         #
-        self.active_nodes = tf.concat([self.active_nodes, tf.constant([child_type == 1], dtype=tf.bool)], axis=0)
+        self.active_nodes = tf.concat([self.active_nodes, tf.constant([child_type in (1, 2)], dtype=tf.bool)], axis=0) # terminals (fold and showdown) are always active
         #
         # Add child range
         #
@@ -552,24 +587,32 @@ class CFRTree:
                 tf.concat([self.regrets, tf.zeros((len(legal_actions), 1326), dtype=tf.float32)], axis=0),
                 trainable=False
             )
+            self.cum_strategies = tf.Variable( # extend, keeping every existing node's accumulated average
+                tf.concat([self.cum_strategies, tf.zeros((len(legal_actions), 1326), dtype=tf.float32)], axis=0),
+                trainable=False
+            )
             indices = tf.stack( # [[child_id, action1], [child_id, action2], ...] NOTE - I think we can replace this
                 [tf.fill((len(legal_actions),), child_id), legal_actions],
                 axis=1
             )
             vals = base + tf.range(len(legal_actions))
             self.strat_idxs = tf.tensor_scatter_nd_update(self.strat_idxs, indices, vals)
-            # Feature vector
-            if self.cfvn:
-                if self.feat_vect_prefixs is not None:
-                    self.feat_vect_prefixs: tf.Tensor
-                    self.vect_idxs = tf.concat([self.vect_idxs, [self.feat_vect_prefixs.shape[0]]], axis=0)
-                    self.feat_vect_prefixs = tf.concat(
-                        [self.feat_vect_prefixs, [self.cfvn.get_prefix(child_game)]],
-                        axis=0
-                    )
-                else:
-                    self.vect_idxs = tf.constant([0], dtype=tf.int32)
-                    self.feat_vect_prefixs = tf.expand_dims(self.cfvn.get_prefix(child_game), axis=0)
+        #
+        # Add feature-prefix index: one entry per node, like every other per-node tensor.
+        # feat_vect_prefixs holds one 57-float row per decision node only;
+        # vect_idxs[node] is that node's row, or -1 when it has none.
+        #
+        if child_type == 0 and self.cfvn:
+            prefix = self.cfvn.get_prefix(child_game)[None, :]          # (1, 57)
+            if self.feat_vect_prefixs is None:
+                prefix_row = 0
+                self.feat_vect_prefixs = prefix
+            else:
+                prefix_row = self.feat_vect_prefixs.shape[0]
+                self.feat_vect_prefixs = tf.concat([self.feat_vect_prefixs, prefix], axis=0)
+        else:
+            prefix_row = -1
+        self.vect_idxs = tf.concat([self.vect_idxs, tf.constant([prefix_row], dtype=tf.int32)], axis=0)
         #
         # Add pot size
         #
@@ -606,6 +649,10 @@ class CFRTree:
         # Update node count
         #
         self.n_nodes += 1
+        #
+        # The tensors were rebuilt: discard the compiled traces
+        #
+        self._bind_compiled()
     
     #
     # Active nodes are considered part of the tree.
@@ -658,12 +705,28 @@ class CFRTree:
     ##################################### 
 
     #
+    # (Re)bind the compiled CFR functions.
+    #
+    # tf.function captures the tensor and Variable OBJECTS it sees when it traces, and
+    # add_child rebuilds those objects on every new node. A trace made before a node was
+    # added therefore reads and writes stale copies. Rebinding discards the traces, so the
+    # next call re-traces (and XLA recompiles) against the current tree. Called from
+    # __init__ and at the end of add_child.
+    #
+    def _bind_compiled(self):
+        self.update_gadget_regrets = tf.function(self._update_gadget_regrets_impl, jit_compile=True)
+        self.update_ranges         = tf.function(self._update_ranges_impl, jit_compile=True)
+        self.update_values_w_cfvn  = tf.function(self._update_values_w_cfvn_impl, jit_compile=True)
+        self.update_values         = tf.function(self._update_values_impl, jit_compile=True)
+        self.cfr_update_w_cfvn     = tf.function(self._cfr_update_w_cfvn_impl, jit_compile=True)
+        self.cfr_update_full_tree  = tf.function(self._cfr_update_full_tree_impl, jit_compile=True)
+
+    #
     # Update the regrets in the gadget game
     #
     # NOTE - implement this function for >2 player games, shouldn't be too hard
     #
-    @tf.function(jit_compile=True)
-    def update_gadget_regrets(self):
+    def _update_gadget_regrets_impl(self):
         #
         # Compute the gadget strategy using the gadget regrets
         #
@@ -766,8 +829,7 @@ class CFRTree:
 
     # NOTE - We can further improve this function by applying the range updates on 
     #        a per level basis in parallel.
-    @tf.function(jit_compile=True)
-    def update_ranges(self):
+    def _update_ranges_impl(self):
         parents = tf.where(self.active_nodes & (self.node_types == 0))[:, 0] # Active decision nodes
         parents = tf.cast(parents, tf.int32)
         def body(i):
@@ -786,43 +848,61 @@ class CFRTree:
         cond = lambda i: i < n
         tf.while_loop(cond, body, (i,))
 
-    @tf.function(jit_compile=True)
-    def update_values_w_cfvn(self):
+    def _update_values_w_cfvn_impl(self):
+        #
+        # No decision child has ever been created (e.g. a re-solve rooted at a spot whose
+        # children are all terminal): there is no frontier and no prefix table. Python-level
+        # check, resolved at trace time.
+        #
+        if self.feat_vect_prefixs is None:
+            return
         # Get the batch of featurized game states
         inactive_nodes = tf.cast(tf.where((self.node_types == 0) & (~self.active_nodes))[:, 0], tf.int32) # non-active decision nodes
         N = tf.shape(inactive_nodes)[0]
-        rm = tf.gather(self.range_map, inactive_nodes)
-        ranges_block = tf.gather(self.ranges, rm)
-        ranges_flat  = tf.reshape(ranges_block, [N, -1])
-        vects = tf.concat(
-            [
-                tf.gather(self.feat_vect_prefixs, tf.gather(self.vect_idxs, inactive_nodes)),
-                ranges_flat
-            ], 
-            axis=1
-        )
-        # Query the cfvn
-        strats, vals = self.cfvn.query(vects)
-        # Update strategies
-        legal_mask = tf.gather(self.legal_actions, inactive_nodes)
-        na_pairs = tf.cast(tf.where(legal_mask), tf.int32)
-        nodes = tf.gather(inactive_nodes, na_pairs[:, 0])
-        strat_row_ids = tf.gather_nd(
-            self.strat_idxs, 
-            tf.stack([nodes, na_pairs[:, 1]], axis=1)
-        )
-        self.strategies.scatter_nd_update(
-            indices=tf.expand_dims(strat_row_ids, axis=1),
-            updates=tf.gather_nd(strats, na_pairs)
-        )
-        # Update values
-        self.values.scatter_nd_update(
-            indices=tf.expand_dims(inactive_nodes, 1),
-            updates=vals
-        )
+        #
+        # Nothing on the frontier right now (every decision node is active): skip the query.
+        # Tensor-level check, becomes a tf.cond.
+        #
+        if N > 0:
+            rm = tf.gather(self.range_map, inactive_nodes)
+            ranges_block = tf.gather(self.ranges, rm)
+            ranges_flat  = tf.reshape(ranges_block, [N, self.n_players * 1326])
+            vects = tf.concat(
+                [
+                    tf.gather(self.feat_vect_prefixs, tf.gather(self.vect_idxs, inactive_nodes)),
+                    ranges_flat
+                ],
+                axis=1
+            )
+            # Query the cfvn
+            strats, vals = self.cfvn.query(vects)
+            # Keep only this node's legal actions and renormalize each hand's column over them;
+            # a hand whose legal mass is zero falls back to uniform over the legal actions.
+            legal_mask = tf.gather(self.legal_actions, inactive_nodes)                        # (N, A) bool
+            legal_f = tf.cast(legal_mask, strats.dtype)[:, :, None]                            # (N, A, 1)
+            strats = strats * legal_f
+            legal_sum = tf.reduce_sum(strats, axis=1, keepdims=True)                           # (N, 1, 1326)
+            n_legal = tf.reduce_sum(legal_f, axis=1, keepdims=True)                            # (N, 1, 1)
+            strats = tf.where(legal_sum > 0.0, tf.math.divide_no_nan(strats, legal_sum), legal_f / n_legal)
+            strats = strats * tf.cast(~self.public_card_mask, strats.dtype)[None, None, :]     # blocked hands stay zero
+            # Update strategies
+            na_pairs = tf.cast(tf.where(legal_mask), tf.int32)
+            nodes = tf.gather(inactive_nodes, na_pairs[:, 0])
+            strat_row_ids = tf.gather_nd(
+                self.strat_idxs,
+                tf.stack([nodes, na_pairs[:, 1]], axis=1)
+            )
+            self.strategies.scatter_nd_update(
+                indices=tf.expand_dims(strat_row_ids, axis=1),
+                updates=tf.gather_nd(strats, na_pairs)
+            )
+            # Update values
+            self.values.scatter_nd_update(
+                indices=tf.expand_dims(inactive_nodes, 1),
+                updates=vals
+            )
 
-    @tf.function(jit_compile=True)
-    def update_values(self):
+    def _update_values_impl(self):
         for node in tf.range(self.n_nodes-1, -1, -1):
             #
             # Active decision node
@@ -909,15 +989,11 @@ class CFRTree:
 
     # Wrapper function
     def cfr_update(self, n_iters: int):
-        # Initialize the cummulative strategies
-        self.cum_strategies = tf.Variable(tf.zeros(tf.shape(self.strategies), dtype=self.strategies.dtype))
         # Select the correct update function
         if self.cfvn_enabled:
             self.cfr_update_w_cfvn(n_iters)
         else:
             self.cfr_update_full_tree(n_iters)
-        # Finish the cummulative strategies
-        self.cum_strategies.assign(tf.divide(self.cum_strategies, n_iters))
 
     #
     # Apply CFR updates
@@ -927,37 +1003,41 @@ class CFRTree:
     #
     # TODO - Implement returning querries
     #
-    @tf.function(jit_compile=True)
-    def cfr_update_w_cfvn(self, n_iters: int):
+    def _cfr_update_w_cfvn_impl(self, n_iters: int):
         acc = tf.zeros_like(self.strategies)
-        for _ in tf.range(n_iters):
+        for i in tf.range(n_iters):
             # Downward pass - propagate range probabilities
             self.update_ranges()
             # Update non-active decision node values with the cfvn
             self.update_values_w_cfvn()
             # Upward pass - bubble up expected values
             self.update_values()
-            # Update gadget game regrets
-            self.update_gadget_regrets()
-            # Accumulate strategies
-            acc = acc + self.strategies
-        self.cum_strategies.assign(acc)
+            # Update gadget game regrets (re-solving only; a fixed-belief solve keeps its root ranges)
+            if self.use_gadget:
+                self.update_gadget_regrets()
+            # Accumulate strategies, linearly weighted by the iteration number over the whole solve
+            weight = self.cfr_iters + tf.cast(i, tf.float32) + 1.0
+            acc = acc + weight * self.strategies
+        self.cum_strategies.assign_add(acc)
+        self.cfr_iters.assign_add(tf.cast(n_iters, tf.float32))
         # Return a list of querries that were made to the cfvn
         return # NOTE - Not implemented
     
-    @tf.function(jit_compile=True)
-    def cfr_update_full_tree(self, n_iters: int):
+    def _cfr_update_full_tree_impl(self, n_iters: int):
         acc = tf.zeros_like(self.strategies)
-        for _ in tf.range(n_iters):
+        for i in tf.range(n_iters):
             # Downward pass - propagate range probabilities
             self.update_ranges()
             # Upward pass - bubble up expected values
             self.update_values()
-            # Update gadget game regrets
-            self.update_gadget_regrets()
-            # Accumulate strategies
-            acc = acc + self.strategies
-        self.cum_strategies.assign(acc)
+            # Update gadget game regrets (re-solving only; a fixed-belief solve keeps its root ranges)
+            if self.use_gadget:
+                self.update_gadget_regrets()
+            # Accumulate strategies, linearly weighted by the iteration number over the whole solve
+            weight = self.cfr_iters + tf.cast(i, tf.float32) + 1.0
+            acc = acc + weight * self.strategies
+        self.cum_strategies.assign_add(acc)
+        self.cfr_iters.assign_add(tf.cast(n_iters, tf.float32))
 
 
 
@@ -978,7 +1058,7 @@ class CFRTree:
     # Returns whether the the attempt was successful or not.
     #     full tree = unsuccessful attempt
     #
-    def grow(self) -> bool:
+    def grow(self, actor_hand: int = None) -> bool:
         #
         # --> STEP 1 - Assign hands to the players
         #
@@ -994,27 +1074,32 @@ class CFRTree:
         player_hands = np.zeros((self.n_players,), dtype=np.int32)
         valid_hands = tf.cast(~self.public_card_mask, dtype=tf.float32)
         # Give the acting player their true hand
-        player = self.players[0] # TODO - This should be the decision point (not neccisarily the root)
-        hand = [card.to_int() for card in self.game_states[0].players[player].hand] # TODO - Use decision point and get rid of the need for the game state
-        player_hands[player] = get_1d_coor(*sorted(hand))
-        hand_mask = tf.cast(~tf.reduce_any(tf.gather(invalid_hands, hand), axis=0), dtype=tf.float32)
-        valid_hands *= hand_mask
-        # Sample the opposing player hands according to their ranges
+        player = int(self.players[0]) # TODO - This should be the decision point (not neccisarily the root)
+        if actor_hand is not None:
+            #
+            # Self-play: the acting player holds a known hand (a deliberate deviation from the
+            # paper, which samples every hand from the root beliefs; see decision A12).
+            #
+            player_hands[player] = actor_hand
+            actor_cards = list(get_2d_coors(actor_hand))
+            hand_mask = tf.cast(~tf.reduce_any(tf.gather(invalid_hands, actor_cards), axis=0), dtype=tf.float32)
+            valid_hands *= hand_mask
+        #
+        # Every player without an assigned hand (the opponent; the actor too in a fixed-belief
+        # query solve) gets one sampled from their range at the root, as in the paper's simulations.
+        #
         for opponent in range(self.n_players):
-            # Skip the acting player
-            if opponent == player:
+            # Skip players whose hand is already assigned
+            if opponent == player and actor_hand is not None:
                 continue
-            # Get the opponent's range
-            logits = self.ranges[self.range_map[0, opponent], :] # TODO - Use decision point
-            # Handle all zeros - assign a uniform distribution
-            if tf.reduce_sum(logits) == 0.:
-                logits = valid_hands / tf.reduce_sum(valid_hands)
-            # Else, remove invalid hands
-            else:
-                logits = logits * valid_hands
-            # Set invalid hands to a very negative logit value
+            # Opponent's range at the root, restricted to hands compatible with the cards already dealt
+            probs = self.ranges[self.range_map[0, opponent], :] * valid_hands # TODO - Use decision point
+            # Degenerate range (no mass on any compatible hand): fall back to uniform over compatible hands
+            if tf.reduce_sum(probs) == 0.:
+                probs = valid_hands / tf.reduce_sum(valid_hands)
+            # tf.random.categorical takes LOG-probabilities; give zero-mass hands an effectively -inf logit
             very_neg = tf.constant(-1e9, tf.float32)
-            masked_logits = tf.where(valid_hands > 0.0, logits, very_neg)
+            masked_logits = tf.where(probs > 0.0, tf.math.log(tf.maximum(probs, 1e-30)), very_neg)
             # Sample
             hand = tf.random.categorical(masked_logits[tf.newaxis, :], num_samples=1)[0, 0]
             player_hands[opponent] = hand
@@ -1023,7 +1108,7 @@ class CFRTree:
                 print("Invalid hand was sampled")
                 import ipdb; ipdb.set_trace()
             # Update valid hands
-            hand_mask = tf.cast(~tf.reduce_any(tf.gather(invalid_hands, hand), axis=0), dtype=tf.float32)
+            hand_mask = tf.cast(~tf.reduce_any(tf.gather(invalid_hands, list(get_2d_coors(int(hand)))), axis=0), dtype=tf.float32) # hands sharing a card with the sampled hand
             valid_hands *= hand_mask
         #
         # --> STEP 2 - Activate a node
@@ -1053,6 +1138,7 @@ class CFRTree:
                 child_values = tf.gather(self.values[:, player, hand], children)
                 child_visits = tf.cast(tf.gather(self.visits, children), tf.float32)
                 cfr_strat = tf.gather(self.cum_strategies, tf.gather(self.strat_idxs[node, :], actions))[:, hand]
+                cfr_strat = cfr_strat / tf.maximum(tf.reduce_sum(cfr_strat), 1e-12) # stored rows are weighted sums
                 puct_scores = child_values + c_puct * (tf.math.sqrt(epsilon+total_visits) / (1 + child_visits)) * cfr_strat
                 puct_strat = tf.nn.softmax(puct_scores)
                 strat = 0.5 * (cfr_strat + puct_strat)
@@ -1084,7 +1170,7 @@ class CFRTree:
                     path.append(next_node)
                     idxs = tf.constant(path, dtype=tf.int32)
                     updates = tf.gather(self.visits, path) + tf.ones(len(path), dtype=tf.int32)
-                    tf.tensor_scatter_nd_update(self.visits, idxs[:, tf.newaxis], updates)
+                    self.visits = tf.tensor_scatter_nd_update(self.visits, idxs[:, tf.newaxis], updates) # functional op: keep the result
                     self.activate(next_node)
                     return True
                 # Else, select this node

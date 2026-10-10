@@ -52,8 +52,9 @@ if TYPE_CHECKING:
 # NOTE - DISABLE GPU USAGE
 #tf.config.set_visible_devices([], 'GPU')
 
-# DEBUG
-MAX_QUERY_QUEUE_SIZE = 64
+# Bounded so a burst of searches cannot grow memory without limit; puts are non-blocking
+# and drop when full. With ~q_search (0.9) queries per search this is rarely reached.
+MAX_QUERY_QUEUE_SIZE = 1024
 
 #
 # The goal of the Counterfactual Value Network is to estimate
@@ -105,7 +106,8 @@ class CounterfactualValueNetwork:
                        n_trainers: int =1,                      # Num. of procs performing batched training updates
                        use_shared_weights: bool =True,          # Use shared weights
                        weights_shm_lock: ReadRWLock =None,       # Read lock for the shared memory buffer
-                       weights_shm_name: str =None):            # Name of the shared memory buffer
+                       weights_shm_name: str =None,             # Name of the shared memory buffer
+                       query_solver_kwargs: dict =None):        # GTCFRSolver settings for the query-solver workers (n_expansions, n_expansions_per_regret_update, ...)
         #
         # Store training parameters
         #
@@ -151,7 +153,7 @@ class CounterfactualValueNetwork:
         # NOTE - For now hard code this to float64, in the future
         #        lower precision options could be interesting to explore.
         #
-        #self.data_type = np.float64
+        self.data_type = np.float32 # numpy dtype for buffers and targets; the network runs in float32
 
         #
         # NOTE - we need the worker processes to share the same model weights
@@ -237,6 +239,20 @@ class CounterfactualValueNetwork:
         # the query using gt-cfr and add the result to the replay buffer.
         #
         self.q_recursive = q_recursive # prob. of adding a recursive query to the queue
+        #
+        # Everything a worker process needs to rebuild an IDENTICAL network. Workers used to
+        # fall back to the constructor defaults, silently diverging from the owner (D20).
+        #
+        self.network_config = dict(
+            num_players=num_players, num_actions=num_actions,
+            num_neurons_per_layer=num_neurons_per_layer, num_layers=num_layers, activation_func=activation_func,
+            batch_size=batch_size, optimizer=optimizer,
+            init_learning_rate=init_learning_rate, decay_rate=decay_rate, decay_steps=decay_steps,
+            policy_w=policy_w, values_w=values_w,
+            max_replay_buffer_size=max_replay_buffer_size, max_grad_updates_per_exmpl=max_grad_updates_per_exmpl,
+            q_recursive=q_recursive,
+        )
+        self.query_solver_kwargs = dict(query_solver_kwargs or {})
         self.query_queue = input_query_queue if input_query_queue is not None else Queue(maxsize=MAX_QUERY_QUEUE_SIZE)
 
         # We can either have 0 child processes or both query and trainer processes
@@ -444,7 +460,8 @@ class CounterfactualValueNetwork:
                 args=(trainer_id,
                       self.replay_buffer_queue,
                       self.shared_weights_lock,
-                      self.shared_weights_buffer.name),
+                      self.shared_weights_buffer.name,
+                      self.network_config),
                 daemon=True
             )
             self.trainer_workers[trainer_id].start()
@@ -462,7 +479,8 @@ class CounterfactualValueNetwork:
     def trainer_process(trainer_id: int,
                         parent_replay_buffer_queue: Queue,
                         weights_shm_lock: ReadWriteLock,
-                        weights_shm_name: str):
+                        weights_shm_name: str,
+                        network_config: dict):
         # Wrap process in a try-except block to debug errors
         try:
             # Runtime import
@@ -480,6 +498,7 @@ class CounterfactualValueNetwork:
             #        args to query_solver_process()
             #
             my_cvfn = CounterfactualValueNetwork(
+                **network_config, # same network as the owner
                 n_query_solvers=0, # Dont spawn query solver processes
                 n_trainers=0, # Dont spawn trainer processes
                 weights_shm_lock=weights_shm_lock, # Use the shared weights buffer
@@ -569,7 +588,9 @@ class CounterfactualValueNetwork:
                       self.query_queue,
                       self.replay_buffer_queue,
                       self.shared_weights_lock,
-                      self.shared_weights_buffer.name),
+                      self.shared_weights_buffer.name,
+                      self.network_config,
+                      self.query_solver_kwargs),
                 # Kill the process when the main process dies
                 daemon=True
             )
@@ -593,9 +614,9 @@ class CounterfactualValueNetwork:
                              parent_query_queue: Queue,
                              parent_replay_buffer_queue: Queue,
                              weights_shm_lock: ReadWriteLock, 
-                             weights_shm_name: str) -> None:
-        # Runtime import
-        from rlcard.agents.gt_cfr_agent.nodes import ChanceNode
+                             weights_shm_name: str,
+                             network_config: dict,
+                             solver_kwargs: dict) -> None:
         #
         # Log the start of the process
         #
@@ -608,6 +629,7 @@ class CounterfactualValueNetwork:
         #        args to query_solver_process()
         #
         my_cfvn = CounterfactualValueNetwork(
+            **network_config, # same network as the owner
             input_query_queue=parent_query_queue, # Place recursive queries back onto the parent process's query queue
             n_query_solvers=0, # Dont spawn query solver processes
             n_trainers=0, # Dont spawn trainer processes
@@ -618,7 +640,7 @@ class CounterfactualValueNetwork:
         # Initialize this process's GT-CFR solver instance
         #
         from rlcard.agents.gt_cfr_agent.gt_cfr_agent import GTCFRSolver
-        my_solver = GTCFRSolver(input_cfvn=my_cfvn, prob_query_solve=my_cfvn.q_recursive)
+        my_solver = GTCFRSolver(input_cfvn=my_cfvn, prob_query_solve=my_cfvn.q_recursive, **solver_kwargs)
         #
         # Loop indefinately...
         #
@@ -633,8 +655,7 @@ class CounterfactualValueNetwork:
                 #
                 # Wait if the query queue is empty
                 #
-                # query 
-                #    = tuple(input vector, player values, player strategy)
+                # query = (game at a frontier node, both players' ranges there)
                 #
                 print(f'Query Solver #{query_solver_id} -> Getting next query')
                 query = parent_query_queue.get(block=True)
@@ -643,32 +664,13 @@ class CounterfactualValueNetwork:
                 # Solve the query
                 #
                 print(f'Query Solver #{query_solver_id} -> Starting solve')
-                target_strat, target_values = my_solver.solve(*query)
+                game, player_ranges = query
+                target_strat, target_values = my_solver.solve(game, input_player_ranges=player_ranges)
                 print(f'Query Solver #{query_solver_id} -> Finished solve')
                 #
-                # Get the input CFVN vector for the given query
+                # Package the target (input = the query's own belief state) and hand it to the trainers
                 #
-                node = my_solver.decision_point
-                is_chance_node = isinstance(node, ChanceNode)
-                input_vect = my_cfvn.to_vect(node.game, node.player_ranges, is_chance_node)
-                #
-                # Reshape the target strategy and values to match the network output dimensions
-                #
-                triu_indices = np.triu_indices(52, k=1)
-                target_strat = target_strat[:, triu_indices[0], triu_indices[1]]
-                target_values = target_values[:, triu_indices[0], triu_indices[1]]
-                #
-                # Pad the target strategy with zeros for invalid actions
-                #
-                target_strat_padded = np.zeros((my_cfvn.num_actions, 1326))
-                all_actions = node.game.round.get_all_actions()
-                valid_action_idxs = [all_actions.index(action) for action in node.actions]
-                for idx, padded_idx in enumerate(valid_action_idxs):
-                    target_strat_padded[padded_idx] = target_strat[idx]
-                #
-                # Place the solved query onto the parent process's replay buffer queue
-                #
-                parent_replay_buffer_queue.put((input_vect, target_strat_padded, target_values))
+                parent_replay_buffer_queue.put(my_cfvn.make_training_target(game, player_ranges, target_strat, target_values))
                 print(f'Query Solver #{query_solver_id} -> Placed the solved query onto the replay buffer queue')
                 #
                 # Reset the solver game tree after solving
@@ -707,7 +709,6 @@ class CounterfactualValueNetwork:
         # For now, we hard code this to be np.float64, the largest data type
         # of the features.
         #
-        self.data_type = tf.float32
         #
         # --> Featurize game object
         #
@@ -730,7 +731,7 @@ class CounterfactualValueNetwork:
         #
         return tf.cast(tf.concat([public_card_encoding, 
                                   pot_commitments,
-                                  acting_player], axis=0), self.data_type)
+                                  acting_player], axis=0), tf.float32)
 
     #
     # Given a game object and player ranges,
@@ -775,12 +776,12 @@ class CounterfactualValueNetwork:
         # --> Featurize player ranges
         #
         assert self.N_PLAYERS == game.num_players, "Game state and network num players mismatch"
-        assert ranges.shape == (self.num_players, 1326), "Unrecognized player range shape"
+        assert ranges.shape == (self.N_PLAYERS, 1326), "Unrecognized player range shape"
         range_vect = ranges.ravel() # flatten
         #
         # --> Concat the game and range features into a single feature vector
         #
-        res = np.concatenate([prefix, range_vect])
+        res = np.concatenate([prefix.numpy(), range_vect]).astype(np.float32)
         assert res.shape == (self.INPUT_DIM,)
         return res
 
@@ -842,10 +843,30 @@ class CounterfactualValueNetwork:
 
 
     #
+    # Package a solved query as a CFVN training target:
+    #
+    #   (feature vector (INPUT_DIM,),
+    #    target strategy padded to all enabled actions (N_ACTIONS, 1326), zero rows for illegal actions,
+    #    target values (N_PLAYERS, 1326))
+    #
+    # The input is the query's own belief state, exactly what the network was asked about
+    # during search (paper: the example is (beta, (v, p))).
+    #
+    def make_training_target(self, game: NolimitholdemGame, player_ranges: np.ndarray,
+                             target_strat: np.ndarray, target_values) -> tuple[np.ndarray]:
+        input_vect = self.to_vect(game, np.asarray(player_ranges, dtype=np.float32))
+        padded = np.zeros((self.N_ACTIONS, 1326), dtype=np.float32)
+        all_actions = game.get_all_actions()
+        for row, action in enumerate(game.get_legal_actions()):
+            padded[all_actions.index(action)] = target_strat[row]
+        return (input_vect, padded, np.asarray(target_values, dtype=np.float32))
+
+
+    #
     # Add a query to the query queue for solving
     #
     def add_to_query_queue(self, query: tuple[np.ndarray]) -> None:
-        assert len(query) == 4 # [game object, opp. values, player range]
+        assert len(query) == 2, 'query = (game, player_ranges (num_players, 1326))'
         try:
             self.query_queue.put(query, block=False)
         except Full:
@@ -863,9 +884,9 @@ class CounterfactualValueNetwork:
         #
         assert len(solved_query) == 3, "Solved query must be of format, (input, output strategy, output values)"
         assert all(isinstance(solved_query[i], np.ndarray) for i in range(3)), "Unexpected solved query type"
-        assert solved_query[0].shape == (self.input_dim,), "Unexpected input dimension"
-        assert solved_query[1].shape == (self.num_actions, 1326), "Unexpected output strategy dimension"
-        assert solved_query[2].shape == (self.num_players, 1326), "Unexpected output values dimension"
+        assert solved_query[0].shape == (self.INPUT_DIM,), "Unexpected input dimension"
+        assert solved_query[1].shape == (self.N_ACTIONS, 1326), "Unexpected output strategy dimension"
+        assert solved_query[2].shape == (self.N_PLAYERS, 1326), "Unexpected output values dimension"
         #
         # Add the solved query to the replay buffer
         #
@@ -898,9 +919,9 @@ class CounterfactualValueNetwork:
         #
         # Initialize the output arrays
         #
-        inputs = np.zeros((self.batch_size, self.input_dim), dtype=self.data_type)
-        target_strategies = np.zeros((self.batch_size, self.num_actions, 1326), dtype=self.data_type)
-        target_values = np.zeros((self.batch_size, self.num_players, 1326), dtype=self.data_type)
+        inputs = np.zeros((self.batch_size, self.INPUT_DIM), dtype=self.data_type)
+        target_strategies = np.zeros((self.batch_size, self.N_ACTIONS, 1326), dtype=self.data_type)
+        target_values = np.zeros((self.batch_size, self.N_PLAYERS, 1326), dtype=self.data_type)
         #
         # Populate the output arrays
         #

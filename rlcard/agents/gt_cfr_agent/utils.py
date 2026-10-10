@@ -2,6 +2,7 @@
 import copy
 from itertools import combinations, permutations
 import numpy as np
+import os
 from pathlib import Path
 import tensorflow as tf
 import treys
@@ -179,6 +180,7 @@ def starting_hand_values(game: NolimitholdemGame) -> np.ndarray:
     #
     # Save the computed values before returning them
     #
+    os.makedirs(directory, exist_ok=True)
     np.save(directory+filename, values)
     return values
 

@@ -17,3 +17,6 @@ experiments/
 dist/
 rlcard/games/doudizhu/jsondata/
 rlcard/agents/gin_rummy_human_agent/gui_cards/cards_png
+
+# train_river.py run directories (checkpoints, metrics)
+examples/gt-cfr/runs/
