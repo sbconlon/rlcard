@@ -47,7 +47,6 @@ def main():
                 'dealer_id': 0 # Fix player 1 as the dealer
     }
     env = rlcard.make('no-limit-holdem', config=config)
-    """import ipdb; ipdb.set_trace()"""
     #
     # Initialize the GT-CFR Agent
     #
@@ -66,7 +65,7 @@ def main():
     query_solver = GTCFRSolver(
         input_cfvn=agent.solver.cfvn,
         n_expansions=3,
-        n_expansions_per_regret_update=0.001, 
+        n_expansions_per_regret_update=0.001,
         prob_query_solve=0.001
     )
     query_solver.cfvn.init_replay_buffer()
@@ -74,16 +73,8 @@ def main():
     #
     # Load truth data
     #
-    true_strat = np.load('strat-fs-7s8s8hThJh.npy')
-    true_values = np.load('values-fs-7s8s8hThJh.npy')
-
-    #
-    # Patch true strat
-    #
-    # NOTE - fix this in the future
-    #
-    tril_idxs = np.tril_indices(52)
-    true_strat[:, tril_idxs[0], tril_idxs[1]] == 0.
+    true_strat = np.load('strat-fs-7s8s8hThJh-tf.npy')
+    true_values = np.load('values-fs-7s8s8hThJh-tf.npy')
 
     #
     # Int to card map
