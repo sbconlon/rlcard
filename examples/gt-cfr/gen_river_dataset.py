@@ -7,7 +7,8 @@
 # (M0-8), and harvest a training target from every decision node both players
 # reach (M0-2): about 20-70 targets per solve instead of one.
 #
-# Targets are written in shards of --shard-size examples:
+# Targets are written in shards of --shard-size examples (default 1024, about 45 minutes of
+# solving on the laptop; when the disk is full the writer waits and retries instead of quitting):
 #
 #   shard-NNNNN.npz   X (n, 2709) float32   CFVN input: board one-hot, pot commitments,
 #                                           actor one-hot, both NORMALIZED ranges
@@ -31,6 +32,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 os.environ.setdefault('TF_FORCE_GPU_ALLOW_GROWTH', 'true')
@@ -51,7 +53,7 @@ def parse_args():
     p.add_argument('--out', required=True, help='dataset directory (created; resumable)')
     p.add_argument('--hours', type=float, default=None, help='wall-clock budget; stop before a spot once exceeded')
     p.add_argument('--max-spots', type=int, default=None, help='stop after this many spots in total')
-    p.add_argument('--shard-size', type=int, default=2048, help='targets per shard')
+    p.add_argument('--shard-size', type=int, default=1024, help='targets per shard (about 45 min of solving; a crash loses at most one unwritten shard)')
     p.add_argument('--iters', type=int, default=1000, help='CFR iterations per exact solve')
     p.add_argument('--seed', type=int, default=0, help='dataset seed; spot i uses rng(seed, i)')
     p.add_argument('--chips', type=int, default=200, help='starting stack in chips (big blind = 2)')
@@ -62,6 +64,10 @@ def parse_args():
     p.add_argument('--p-sparse', type=float, default=1 / 3, help='per-player chance of a sparse range')
     p.add_argument('--min-reach', type=float, default=0.01, help='harvest nodes where both players reach with mass above this (below about 0.01 CFR leaves the node unconverged: P2 check)')
     p.add_argument('--verbose', action='store_true', help='show solver prints')
+    p.add_argument('--spots-per-process', type=int, default=100,
+                   help='restart the worker process after this many spots (the worker leaks about 30 MB of host memory per spot; ~1190 spots '
+                        'exhausted 16 GB RAM + pagefile on night 1); 0 = single process')
+    p.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)   # internal: run one chunk, no supervisor
     return p.parse_args()
 
 
@@ -91,8 +97,40 @@ def load_manifest(out, args):
     return {'args': vars(args), 'spots_done': 0, 'targets': 0, 'shards': 0, 'n_actions': None}
 
 
+def supervise(args):
+    """Run the generator in chunks of --spots-per-process spots, each in a fresh process, until the
+    budget or --max-spots is reached. Each chunk resumes from the manifest."""
+    t_run = time.time()
+    while True:
+        if args.hours is not None and time.time() - t_run > args.hours * 3600:
+            print(f'Supervisor: wall-clock budget of {args.hours} h reached; stopping.', flush=True); return 0
+        os.makedirs(args.out, exist_ok=True)
+        manifest_path = os.path.join(args.out, 'manifest.json')
+        done = json.load(open(manifest_path))['spots_done'] if os.path.exists(manifest_path) else 0
+        if args.max_spots is not None and done >= args.max_spots:
+            print(f'Supervisor: {done} spots done; --max-spots reached.', flush=True); return 0
+        chunk_end = done + args.spots_per_process
+        if args.max_spots is not None:
+            chunk_end = min(chunk_end, args.max_spots)
+        cmd = [sys.executable, os.path.abspath(__file__), '--worker', '--max-spots', str(chunk_end)]
+        if args.hours is not None:
+            cmd += ['--hours', f'{max(args.hours - (time.time() - t_run) / 3600, 0.01):.4f}']
+        for key in ('out', 'shard_size', 'iters', 'seed', 'chips', 'max_raises', 'p_facing_bet', 'p_uniform',
+                    'p_pair', 'p_sparse', 'min_reach'):
+            cmd += ['--' + key.replace('_', '-'), str(getattr(args, key))]
+        if args.verbose:
+            cmd.append('--verbose')
+        print(f'Supervisor: spots {done} -> {chunk_end} in a fresh process', flush=True)
+        rc = subprocess.call(cmd)
+        if rc != 0:
+            print(f'Supervisor: worker exited with code {rc}; retrying in 60 s (shards are intact, it resumes)', flush=True)
+            time.sleep(60)
+
+
 def main():
     args = parse_args()
+    if not args.worker and args.spots_per_process > 0:
+        raise SystemExit(supervise(args))
     os.makedirs(args.out, exist_ok=True)
     manifest = load_manifest(args.out, args)
     progress_path = os.path.join(args.out, 'progress.csv')
@@ -126,9 +164,21 @@ def main():
         n = len(buf['X'])
         if n == 0:
             return
-        if shutil.disk_usage(args.out).free / 1e9 < MIN_FREE_GB:
-            print('WARNING: less than 2 GB free; shard not written, stopping', flush=True)
-            raise SystemExit(1)
+        #
+        # Disk full: wait rather than quit. The buffer holds up to an hour of solving and the
+        # job runs unattended overnight; a stop would throw that work away and idle the GPU
+        # until morning (river-v1 night 1 stopped at spot 401 this way).
+        #
+        waited = 0
+        while shutil.disk_usage(args.out).free / 1e9 < MIN_FREE_GB:
+            if waited % 600 == 0:
+                print(f'WARNING: less than {MIN_FREE_GB:.0f} GB free; holding {n} targets in memory and '
+                      f'retrying every minute (waited {waited // 60} min)', flush=True)
+            time.sleep(60)
+            waited += 60
+            if args.hours is not None and time.time() - t_run > (args.hours + 1) * 3600:
+                print('WARNING: disk still full one hour past the budget; attempting the write anyway', flush=True)
+                break
         stem = os.path.join(args.out, f'shard-{shard_idx:05d}')
         arrays = dict(X=np.stack(buf['X']).astype(np.float32), S=np.stack(buf['S']).astype(np.float16),
                       V=np.stack(buf['V']).astype(np.float16), pot=np.asarray(buf['pot'], np.int32),

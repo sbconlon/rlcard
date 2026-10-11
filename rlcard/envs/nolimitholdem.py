@@ -23,7 +23,6 @@ class NolimitholdemEnv(Env):
         '''
         self.name = 'no-limit-holdem'
         self.default_game_config = DEFAULT_GAME_CONFIG
-        print(config.get('fixed_pubic_cards', []))
         self.game = Game(fixed_public_cards=config.get('fixed_public_cards', []),
                          fixed_player_cards=config.get('fixed_player_cards', {}),
                          starting_stage=config.get('starting_stage', None),
