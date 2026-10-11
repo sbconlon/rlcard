@@ -30,12 +30,30 @@ class NolimitholdemGame(Game):
                        fixed_public_cards=[], 
                        fixed_player_cards={}, 
                        starting_stage='preflop',
-                       disabled_actions=None
+                       disabled_actions=None,
+                       starting_pot=None,
+                       max_raises_per_street=None
     ):
         """Initialize the class no limit holdem Game"""
         super().__init__(allow_step_back, num_players)
         self.np_random = np.random.RandomState()
-        self.disabled_actions = disabled_actions if disabled_actions is not None else set()
+        # Disabled actions, per street. A plain set applies to every street; a dict
+        # {'preflop'|'flop'|'turn'|'river' or Stage: set} gives each street its own set
+        # (missing streets: nothing disabled). self.disabled_actions keeps the actions
+        # disabled on EVERY street, so get_num_actions / get_all_actions describe the
+        # fixed action axis the agent sees across the whole hand.
+        streets = (Stage.PREFLOP, Stage.FLOP, Stage.TURN, Stage.RIVER)
+        if isinstance(disabled_actions, dict):
+            str_to_stage = {'preflop': Stage.PREFLOP, 'flop': Stage.FLOP, 'turn': Stage.TURN, 'river': Stage.RIVER}
+            by_stage = {str_to_stage.get(k, k): set(v) for k, v in disabled_actions.items()}
+            self.disabled_actions_by_stage = {st: by_stage.get(st, set()) for st in streets}
+        else:
+            d = set(disabled_actions) if disabled_actions is not None else set()
+            self.disabled_actions_by_stage = {st: set(d) for st in streets}
+        self.disabled_actions = set.intersection(*self.disabled_actions_by_stage.values())
+
+        # Raise cap per street (None = unlimited); see Round.max_raises
+        self.max_raises_per_street = max_raises_per_street
 
         # small blind and big blind
         self.small_blind = 1
@@ -96,6 +114,13 @@ class NolimitholdemGame(Game):
         assert(starting_stage in ('preflop', 'flop', 'turn', 'river'))
         str_to_stage = {'preflop': Stage.PREFLOP, 'flop': Stage.FLOP, 'turn': Stage.TURN, 'river': Stage.RIVER}
         self.starting_stage = str_to_stage[starting_stage]
+
+        # Total pot (chips) at the start of starting_stage, split equally between the
+        # players as chips committed on the earlier streets. None keeps the blinds-only pot.
+        self.starting_pot = starting_pot
+        if starting_pot is not None:
+            assert self.starting_stage != Stage.PREFLOP, "starting_pot needs a post-flop starting_stage"
+            assert starting_pot % num_players == 0, "starting_pot must split equally between the players"
 
     def configure(self, game_config):
         """
@@ -241,7 +266,9 @@ class NolimitholdemGame(Game):
 
         # Initialize a bidding round, in the first round, the big blind and the small blind needs to
         # be passed to the round for processing.
-        self.round = Round(self.num_players, self.big_blind, dealer=self.dealer, np_random=self.np_random, disabled_actions=self.disabled_actions)
+        self.round = Round(self.num_players, self.big_blind, dealer=self.dealer, np_random=self.np_random,
+                           disabled_actions=self.disabled_actions_by_stage[Stage.PREFLOP],
+                           max_raises=self.max_raises_per_street)
 
         self.round.start_new_round(game_pointer=self.game_pointer, raised=[p.in_chips for p in self.players])
 
@@ -260,6 +287,17 @@ class NolimitholdemGame(Game):
                 self.step(Action.CALL)
             else:
                 raise ValueError("We should always be able to check or call")
+
+        # Commit the earlier streets' action as an equal contribution from each player.
+        # Goes through Player.bet so in_chips / remained_chips (payoffs, CFVN prefix) stay
+        # consistent; the dealer's pot is recomputed from in_chips by get_state. The
+        # current street's `raised` is untouched, so the first bet is sized off the new pot.
+        if self.starting_pot is not None:
+            extra = (self.starting_pot - sum(p.in_chips for p in self.players)) // self.num_players
+            assert extra >= 0, "starting_pot is smaller than the blinds already in the pot"
+            assert all(p.remained_chips > extra for p in self.players), "starting_pot exceeds a player's stack"
+            for p in self.players:
+                p.bet(chips=extra)
 
         state = self.get_state(self.game_pointer)
 
@@ -346,6 +384,7 @@ class NolimitholdemGame(Game):
                     self.round_counter += 1
 
             self.round_counter += 1
+            self.round.disabled_actions = self.disabled_actions_by_stage[self.stage]   # this street's bet sizes
             self.round.start_new_round(self.game_pointer)
 
         state = self.get_state(self.game_pointer)
@@ -416,4 +455,6 @@ class NolimitholdemGame(Game):
         return len(Action) - len(self.disabled_actions)
     
     def get_all_actions(self):
-        return self.round.get_all_actions()
+        # Every action enabled on at least one street, in enum order: the fixed action
+        # axis for the CFVN and the tree, independent of the current street.
+        return [action for action in Action if action not in self.disabled_actions]

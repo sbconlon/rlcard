@@ -336,6 +336,64 @@ class CFRTree:
         return game, ranges
 
 
+    #
+    # Evaluate the tree under the AVERAGE strategy (plan M0-8): strategies := normalized
+    # cum_strategies (current strategy where a node has no average yet), then one ranges
+    # pass and one values pass. Afterwards `ranges` and `values` describe the average
+    # strategy, which is what training targets and the product should read: the last
+    # iterate's values at rarely reached nodes carry stale regret history (P0 spike:
+    # 2-7 % of pot off at facing-all-in nodes vs 0.5 % under the average). The values
+    # pass regret-matches a fresh current strategy as a side effect, so call this once,
+    # after the solve is finished.
+    #
+    def evaluate_average_strategy(self) -> None:
+        cum = self.cum_strategies.numpy()
+        cur = self.strategies.numpy()
+        node_types = self.node_types.numpy()
+        strat_idxs = self.strat_idxs.numpy()
+        avg = cur.copy()
+        for node in range(int(self.n_nodes)):
+            if node_types[node] != 0:
+                continue
+            idx = strat_idxs[node][self.legal_actions[node]]
+            block = cum[idx]
+            ssum = block.sum(axis=0, keepdims=True)
+            avg[idx] = np.where(ssum > 0, block / np.where(ssum > 0, ssum, 1.0), cur[idx])
+        self.strategies.assign(avg)
+        self.update_ranges()
+        self.update_values()
+
+    #
+    # Training targets from every decision node both players reach with mass > min_reach
+    # (call after evaluate_average_strategy). Tree ranges are unnormalized reach
+    # probabilities and values are linear in the opponent's reach mass, so each target
+    # carries the NORMALIZED ranges and the values divided by the opponent's mass: the
+    # quantities a fixed-belief solve rooted at that node would return (P0 spike, M0-2).
+    # Values are in chips; the caller normalizes by the pot (M0-5).
+    #
+    def harvest(self, min_reach: float = 0.01) -> list[dict]:
+        R = self.ranges.numpy()
+        RM = self.range_map.numpy()
+        V = self.values.numpy()
+        node_types = self.node_types.numpy()
+        targets = []
+        for node in range(int(self.n_nodes)):
+            if node_types[node] != 0:
+                continue
+            r = R[RM[node]]
+            m = r.sum(axis=1)
+            if m[0] <= min_reach or m[1] <= min_reach:
+                continue
+            v = V[node].copy()
+            v[0] /= m[1]
+            v[1] /= m[0]
+            game = self.game_states[node]
+            targets.append(dict(node=node, game=game, ranges=(r / m[:, None]).astype(np.float32),
+                                reach_mass=m.astype(np.float32), values=v.astype(np.float32),
+                                strategy=self.get_cum_strategy(node), pot=int(game.dealer.pot),
+                                depth=len(game.trajectory) - len(self.game_states[0].trajectory)))
+        return targets
+
     def get_values(self, node: int) -> np.ndarray:
         return self.values[node, :, :]
 

@@ -27,7 +27,7 @@ config = {
     'fixed_public_cards': [Card('H', 'T'), Card('S', '8'), Card('S', '7'), Card('H', 'J'), Card('H', '8')],
     'starting_stage': 'river',
     'chips_for_each': 10,
-    'disabled_actions': {Action.BET_POT, Action.BET_5POT, Action.RAISE_3X, Action.RAISE_5X},
+    'disabled_actions': {Action.BET_THIRD_POT, Action.BET_POT, Action.BET_5POT, Action.RAISE_3X, Action.RAISE_5X},
     'dealer_id': 0,
 }
 env = rlcard.make('no-limit-holdem', config=config)

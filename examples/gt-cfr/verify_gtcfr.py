@@ -34,7 +34,7 @@ def main():
 
                 'starting_stage': 'river',
                 'chips_for_each': 10,
-                'disabled_actions': {Action.BET_POT,
+                'disabled_actions': {Action.BET_THIRD_POT, Action.BET_POT,
                                      Action.BET_5POT,
                                      Action.RAISE_3X,
                                      Action.RAISE_5X}

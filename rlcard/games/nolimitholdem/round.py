@@ -10,15 +10,16 @@ class Action(Enum):
     CHECK = 1
     CALL = 2
     ALL_IN = 3
-    # BET ACTIONS
-    BET_HALF_POT = 4
-    BET_POT = 5
-    BET_2POT = 6
-    BET_5POT = 7
-    # RAISE ACTIONS
-    RAISE_2X = 8
-    RAISE_3X = 9
-    RAISE_5X = 10
+    # BET ACTIONS (fraction of the pot)
+    BET_THIRD_POT = 4
+    BET_HALF_POT = 5
+    BET_POT = 6
+    BET_2POT = 7
+    BET_5POT = 8
+    # RAISE ACTIONS (multiple of the bet faced)
+    RAISE_2X = 9
+    RAISE_3X = 10
+    RAISE_5X = 11
 
 default_actions_set = {
     Action.FOLD, 
@@ -28,6 +29,7 @@ default_actions_set = {
 }
 
 bet_actions_set = {
+    Action.BET_THIRD_POT,
     Action.BET_HALF_POT, 
     Action.BET_POT, 
     Action.BET_2POT,
@@ -35,6 +37,7 @@ bet_actions_set = {
 }
 
 bet_actions_multipliers = {
+    Action.BET_THIRD_POT: 1/3,
     Action.BET_HALF_POT: 0.5, 
     Action.BET_POT: 1, 
     Action.BET_2POT: 2,
@@ -56,7 +59,7 @@ raise_actions_multipliers = {
 class NolimitholdemRound:
     """Round can call functions from other classes to keep the game running"""
 
-    def __init__(self, num_players, init_raise_amount, dealer, np_random, disabled_actions=None):
+    def __init__(self, num_players, init_raise_amount, dealer, np_random, disabled_actions=None, max_raises=None):
         """
         Initialize the round class
 
@@ -71,6 +74,12 @@ class NolimitholdemRound:
 
         # Exclude these actions from the set of legal actions
         self.disabled_actions = disabled_actions if disabled_actions is not None else set()
+
+        # Raise cap per street: once this many raises have been made in the round, raise
+        # actions are no longer legal (call / fold / all-in remain). None = unlimited.
+        # An opening bet is not a raise; an all-in over a bet is.
+        self.max_raises = max_raises
+        self.n_raises = 0
 
         self.dealer = dealer
 
@@ -96,6 +105,7 @@ class NolimitholdemRound:
         """
         self.game_pointer = game_pointer
         self.not_raise_num = 0
+        self.n_raises = 0
         if raised:
             self.raised = raised
         else:
@@ -143,6 +153,8 @@ class NolimitholdemRound:
         #
         # Action.ALL_IN = 3
         elif action == Action.ALL_IN:
+            if max(self.raised) > 0:
+                self.n_raises += 1   # all-in over a bet re-opens the action
             all_in_quantity = player.remained_chips
             self.raised[self.game_pointer] += all_in_quantity
             player.bet(chips=all_in_quantity)
@@ -165,6 +177,7 @@ class NolimitholdemRound:
             self.raised[self.game_pointer] += bet_size
             player.bet(chips=bet_size)
             self.not_raise_num = 1
+            self.n_raises += 1
         #
         # Error condition
         else:
@@ -238,10 +251,11 @@ class NolimitholdemRound:
         elif diff == 0:
             legal_actions.add(Action.CHECK)
             legal_actions.add(Action.ALL_IN)
-            for action, multiplier in raise_actions_multipliers.items():
-                raise_cost = int(multiplier * faced) - self.raised[self.game_pointer]
-                if player.remained_chips > raise_cost:
-                    legal_actions.add(action)
+            if self.max_raises is None or self.n_raises < self.max_raises:
+                for action, multiplier in raise_actions_multipliers.items():
+                    raise_cost = int(multiplier * faced) - self.raised[self.game_pointer]
+                    if player.remained_chips > raise_cost:
+                        legal_actions.add(action)
         #
         # Case 3 - Facing a bet: fold, call, or raise
         #
@@ -250,10 +264,11 @@ class NolimitholdemRound:
             legal_actions.add(Action.CALL)
             if player.remained_chips > diff:
                 legal_actions.add(Action.ALL_IN)
-            for action, multiplier in raise_actions_multipliers.items():
-                raise_cost = int(multiplier * faced) - self.raised[self.game_pointer]
-                if player.remained_chips > raise_cost:
-                    legal_actions.add(action)
+            if self.max_raises is None or self.n_raises < self.max_raises:
+                for action, multiplier in raise_actions_multipliers.items():
+                    raise_cost = int(multiplier * faced) - self.raised[self.game_pointer]
+                    if player.remained_chips > raise_cost:
+                        legal_actions.add(action)
 
         #
         # Remove disabled actions

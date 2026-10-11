@@ -27,7 +27,9 @@ class NolimitholdemEnv(Env):
         self.game = Game(fixed_public_cards=config.get('fixed_public_cards', []),
                          fixed_player_cards=config.get('fixed_player_cards', {}),
                          starting_stage=config.get('starting_stage', None),
-                         disabled_actions=config.get('disabled_actions', None))
+                         disabled_actions=config.get('disabled_actions', None),
+                         starting_pot=config.get('starting_pot', None),
+                         max_raises_per_street=config.get('max_raises_per_street', None))
         super().__init__(config)
         self.actions = Action
         self.state_shape = [[54] for _ in range(self.num_players)]

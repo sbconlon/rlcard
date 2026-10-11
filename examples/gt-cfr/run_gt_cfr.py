@@ -41,7 +41,7 @@ def main():
                 #   - BET_2_POT
                 #   - RAISE_2X
                 #
-                'disabled_actions': {Action.BET_POT,
+                'disabled_actions': {Action.BET_THIRD_POT, Action.BET_POT,
                                      Action.BET_5POT,
                                      Action.RAISE_3X,
                                      Action.RAISE_5X}

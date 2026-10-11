@@ -32,6 +32,7 @@ import io
 import json
 import os
 import pickle
+import shutil
 import queue
 import random
 import sys
@@ -53,7 +54,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GOLDEN_BOARD = 'Th8s7sJh8h'   # the river ground-truth spot of cfr_full_solve.py
 GOLDEN_STRAT = os.path.join(SCRIPT_DIR, 'strat-fs-7s8s8hThJh-tf.npy')
 GOLDEN_VALUES = os.path.join(SCRIPT_DIR, 'values-fs-7s8s8hThJh-tf.npy')
-DISABLED_ACTIONS = {Action.BET_POT, Action.BET_5POT, Action.RAISE_3X, Action.RAISE_5X}
+DISABLED_ACTIONS = {Action.BET_THIRD_POT, Action.BET_POT, Action.BET_5POT, Action.RAISE_3X, Action.RAISE_5X}
 
 METRICS_COLUMNS = ['cycle', 'timestamp', 'board', 'actions', 'hand_time_s',
                    'n_queries', 'query_time_s', 'buffer_size', 'n_updates', 'mean_loss',
@@ -73,6 +74,10 @@ def parse_args():
                      help='run directory: checkpoint, metrics.csv, state.json')
     run.add_argument('--resume', action='store_true', help='continue from the checkpoint in --out')
     run.add_argument('--cycles', type=int, default=2, help='cycles to run (in total, counting resumed ones)')
+    run.add_argument('--max-hours', type=float, default=None,
+                     help='wall-clock budget: stop before starting a cycle once this many hours have passed')
+    run.add_argument('--checkpoint-every', type=int, default=1,
+                     help='save the checkpoint every n cycles (metrics are written every cycle; the replay buffer pickle grows with the run)')
     run.add_argument('--hands-per-cycle', type=int, default=1, help='self-play hands per cycle')
     run.add_argument('--seed', type=int, default=0, help='numpy / python / TensorFlow seed')
     run.add_argument('--verbose', action='store_true', help='show the solver and trainer prints')
@@ -105,9 +110,10 @@ def parse_args():
     net.add_argument('--max-uses', type=int, default=10, help='evict a target after this many samples')
 
     ev = p.add_argument_group('evaluation')
-    ev.add_argument('--eval-every', type=int, default=1, help='evaluate every n cycles (0 = never)')
+    ev.add_argument('--eval-every', type=int, default=1,
+                    help='run the GT-CFR search evaluation on the golden spot every n cycles (0 = never); the cheap network-only evaluation runs every cycle')
     ev.add_argument('--no-eval-search', action='store_true',
-                    help='skip the GT-CFR search on the golden spot (network-only evaluation)')
+                    help='never run the GT-CFR search evaluation (network-only evaluation)')
     return p.parse_args()
 
 
@@ -164,8 +170,33 @@ def atomic_write(path, write_fn):
     os.replace(tmp, path)
 
 
+MIN_FREE_GB = 2.0   # refuse to write a checkpoint into a nearly full disk (a half-written .h5 is worse than none)
+
+
 def save_checkpoint(run_dir, cfvn, next_cycle, args):
+    """Write the checkpoint. Returns True on success. Never raises: a failed save (disk full,
+    locked file) is logged and the run continues, since the metrics row and the next attempt
+    are worth more than a clean traceback."""
     p = paths(run_dir)
+    try:
+        free_gb = shutil.disk_usage(run_dir).free / 1e9
+        if free_gb < MIN_FREE_GB:
+            raise OSError(f'only {free_gb:.1f} GB free on the run directory disk')
+        _save_checkpoint_files(p, cfvn, next_cycle, args)
+        return True
+    except Exception as e:  # noqa: BLE001
+        for path in p.values():
+            tmp = path + '.tmp'
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        print(f'WARNING: checkpoint not saved ({e}); the previous checkpoint is kept, training continues', flush=True)
+        return False
+
+
+def _save_checkpoint_files(p, cfvn, next_cycle, args):
     atomic_write(p['weights'], lambda t: cfvn.network.save_weights(t, save_format='h5'))
     atomic_write(p['optimizer'], lambda t: pickle.dump(cfvn.optimizer.get_weights(), open(t, 'wb')))
     # ~58 KB per target (2709 + 9 * 1326 float32); fine for thousands of targets
@@ -295,22 +326,26 @@ def main():
           f'q_search={args.q_search}, targets={args.targets}, lr={args.lr} batch={args.batch_size} '
           f'net={args.layers}x{args.width}', flush=True)
 
+    t_run = time.time()
+    last_saved = completed = first_cycle
     for cycle in range(first_cycle, args.cycles):
+        if args.max_hours is not None and time.time() - t_run > args.max_hours * 3600:
+            print(f'Wall-clock budget of {args.max_hours} h reached before cycle {cycle}; stopping.', flush=True)
+            break
         t_cycle = time.time()
         row = dict.fromkeys(METRICS_COLUMNS, '')
         row['cycle'] = cycle
         row['timestamp'] = time.strftime('%Y-%m-%d %H:%M:%S')
 
         #
-        # 1. Evaluate on the golden spot
+        # 1. Evaluate on the golden spot: network alone every cycle, network + search every --eval-every
         #
-        if args.eval_every and cycle % args.eval_every == 0:
-            t0 = time.time()
-            row['net_strat_mae'], row['net_values_mae'] = eval_network(cfvn, eval_env.game, golden_strat, golden_values)
-            if not args.no_eval_search:
-                row['search_strat_mae'], row['search_values_mae'] = eval_search(
-                    eval_solver, eval_env, golden_strat, golden_values, args.verbose)
-            row['eval_time_s'] = round(time.time() - t0, 1)
+        t0 = time.time()
+        row['net_strat_mae'], row['net_values_mae'] = eval_network(cfvn, eval_env.game, golden_strat, golden_values)
+        if not args.no_eval_search and args.eval_every and cycle % args.eval_every == 0:
+            row['search_strat_mae'], row['search_values_mae'] = eval_search(
+                eval_solver, eval_env, golden_strat, golden_values, args.verbose)
+        row['eval_time_s'] = round(time.time() - t0, 1)
 
         #
         # 2. Self-play: searches log queries onto cfvn.query_queue
@@ -359,7 +394,9 @@ def main():
         # 5. Checkpoint and log
         #
         row['cycle_time_s'] = round(time.time() - t_cycle, 1)
-        save_checkpoint(args.out, cfvn, cycle + 1, args)
+        completed = cycle + 1
+        if completed % args.checkpoint_every == 0 and save_checkpoint(args.out, cfvn, completed, args):
+            last_saved = completed
         with open(p['metrics'], 'a', newline='') as f:
             csv.writer(f).writerow([row[k] for k in METRICS_COLUMNS])
         print(f"[cycle {cycle}] board {row['board']} | actions {row['actions']} | "
@@ -374,7 +411,9 @@ def main():
     # thread blocks interpreter exit while trying to flush them.
     #
     cfvn.query_queue.cancel_join_thread()
-    print(f'Done. Checkpoint and metrics in {args.out}')
+    if last_saved != completed:
+        save_checkpoint(args.out, cfvn, completed, args)
+    print(f'Done. Checkpoint and metrics in {args.out} (elapsed {(time.time() - t_run) / 3600:.2f} h)')
 
 
 if __name__ == '__main__':
