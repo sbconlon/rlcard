@@ -15,6 +15,8 @@
 #                     S (n, A, 1326) float16 average strategy, rows in all_actions order,
 #                                           zero rows for illegal actions
 #                     V (n, 2, 1326) float16 values / pot at the node (M0-5), for normalized beliefs
+#                     legal (n, A) bool     legal-action mask at the node (a zero S row alone cannot tell
+#                                           'illegal' from 'legal but never chosen'); shards 0-30 of river-v1 predate it
 #                     pot (n,) int32, depth (n,) int16, reach (n, 2) float32, spot (n,) int32
 #   shard-NNNNN.json  per-spot metadata (board, pot, facing bet, range draws, node counts, time)
 #   manifest.json     args, seed, spots done, targets written (updated after every shard)
@@ -153,7 +155,7 @@ def main():
 
     spot_idx = manifest['spots_done']
     shard_idx = manifest['shards']
-    buf = {'X': [], 'S': [], 'V': [], 'pot': [], 'depth': [], 'reach': [], 'spot': []}
+    buf = {'X': [], 'S': [], 'V': [], 'legal': [], 'pot': [], 'depth': [], 'reach': [], 'spot': []}
     spot_meta = []
     t_run = time.time()
     print(f'{args.out}: resuming at spot {spot_idx}, shard {shard_idx}, {manifest["targets"]} targets so far; '
@@ -181,7 +183,8 @@ def main():
                 break
         stem = os.path.join(args.out, f'shard-{shard_idx:05d}')
         arrays = dict(X=np.stack(buf['X']).astype(np.float32), S=np.stack(buf['S']).astype(np.float16),
-                      V=np.stack(buf['V']).astype(np.float16), pot=np.asarray(buf['pot'], np.int32),
+                      V=np.stack(buf['V']).astype(np.float16), legal=np.stack(buf['legal']).astype(np.bool_),
+                      pot=np.asarray(buf['pot'], np.int32),
                       depth=np.asarray(buf['depth'], np.int16), reach=np.stack(buf['reach']).astype(np.float32),
                       spot=np.asarray(buf['spot'], np.int32))
         atomic_write(stem + '.npz', lambda t: np.savez(open(t, 'wb'), **arrays))
@@ -219,9 +222,12 @@ def main():
         t_solve = time.time() - t0
         t0 = time.time()
         targets = tree.harvest(args.min_reach)
+        all_actions = game.get_all_actions()
         for t in targets:
             x, s, v = feat.make_training_target(t['game'], t['ranges'], t['strategy'], t['values'] / t['pot'])
-            buf['X'].append(x); buf['S'].append(s); buf['V'].append(v)
+            legal = np.zeros(n_actions, dtype=np.bool_)
+            legal[[all_actions.index(a) for a in t['game'].get_legal_actions()]] = True
+            buf['X'].append(x); buf['S'].append(s); buf['V'].append(v); buf['legal'].append(legal)
             buf['pot'].append(t['pot']); buf['depth'].append(t['depth']); buf['reach'].append(t['reach_mass']); buf['spot'].append(spot_idx)
         t_harvest = time.time() - t0
         n_nodes = int(tree.n_nodes)
